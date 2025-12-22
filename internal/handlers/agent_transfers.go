@@ -572,12 +572,23 @@ func (a *App) createTransferFromKeyword(account *models.WhatsAppAccount, contact
 		return
 	}
 
-	// Get chatbot settings to check AssignToSameAgent
+	// Get chatbot settings to check AssignToSameAgent and business hours
 	var settings models.ChatbotSettings
 	a.DB.Where("organization_id = ? AND whats_app_account = ?", account.OrganizationID, account.Name).
 		Or("organization_id = ? AND whats_app_account = ''", account.OrganizationID).
 		Order("whats_app_account DESC"). // Prefer account-specific settings
 		First(&settings)
+
+	// Check business hours - if outside hours, send out of hours message instead of transfer
+	if settings.BusinessHoursEnabled && len(settings.BusinessHours) > 0 {
+		if !a.isWithinBusinessHours(settings.BusinessHours) {
+			a.Log.Info("Outside business hours, sending out of hours message instead of transfer", "contact_id", contact.ID)
+			if settings.OutOfHoursMessage != "" {
+				a.sendAndSaveTextMessage(account, contact, settings.OutOfHoursMessage)
+			}
+			return
+		}
+	}
 
 	// Determine agent assignment
 	var agentID *uuid.UUID
