@@ -286,6 +286,9 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger) {
 	g.POST("/api/messages/media", app.SendMediaMessage)
 	g.PUT("/api/messages/{id}/read", app.MarkMessageRead)
 
+	// Media (serves media files for messages, auth-protected)
+	g.GET("/api/media/{message_id}", app.ServeMedia)
+
 	// Templates
 	g.GET("/api/templates", app.ListTemplates)
 	g.POST("/api/templates", app.CreateTemplate)

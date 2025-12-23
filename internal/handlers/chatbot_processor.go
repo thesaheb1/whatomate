@@ -18,7 +18,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// IncomingTextMessage represents a text or interactive message from the webhook
+// IncomingTextMessage represents a text, interactive, or media message from the webhook
 type IncomingTextMessage struct {
 	From      string `json:"from"`
 	ID        string `json:"id"`
@@ -39,6 +39,29 @@ type IncomingTextMessage struct {
 			Description string `json:"description"`
 		} `json:"list_reply,omitempty"`
 	} `json:"interactive,omitempty"`
+	Image *struct {
+		ID       string `json:"id"`
+		MimeType string `json:"mime_type"`
+		SHA256   string `json:"sha256"`
+		Caption  string `json:"caption,omitempty"`
+	} `json:"image,omitempty"`
+	Document *struct {
+		ID       string `json:"id"`
+		MimeType string `json:"mime_type"`
+		SHA256   string `json:"sha256"`
+		Filename string `json:"filename,omitempty"`
+		Caption  string `json:"caption,omitempty"`
+	} `json:"document,omitempty"`
+	Audio *struct {
+		ID       string `json:"id"`
+		MimeType string `json:"mime_type"`
+	} `json:"audio,omitempty"`
+	Video *struct {
+		ID       string `json:"id"`
+		MimeType string `json:"mime_type"`
+		SHA256   string `json:"sha256"`
+		Caption  string `json:"caption,omitempty"`
+	} `json:"video,omitempty"`
 }
 
 // processIncomingMessageFull processes incoming WhatsApp messages with chatbot logic
@@ -60,10 +83,11 @@ func (a *App) processIncomingMessageFull(phoneNumberID string, msg IncomingTextM
 	// Get or create contact (always do this for all incoming messages)
 	contact := a.getOrCreateContact(account.OrganizationID, msg.From, profileName)
 
-	// Get message content - handle text, button replies, and list replies
+	// Get message content - handle text, button replies, list replies, and media
 	messageText := ""
 	messageType := msg.Type
 	buttonID := "" // Track button/list ID for conditional routing
+	var mediaInfo *MediaInfo
 
 	if msg.Type == "text" && msg.Text != nil {
 		messageText = msg.Text.Body
@@ -78,10 +102,82 @@ func (a *App) processIncomingMessageFull(phoneNumberID string, msg IncomingTextM
 			messageText = msg.Interactive.ListReply.Title
 			buttonID = msg.Interactive.ListReply.ID
 		}
+	} else if msg.Type == "image" && msg.Image != nil {
+		// Handle image message
+		messageText = msg.Image.Caption
+		mediaInfo = &MediaInfo{
+			MediaMimeType: msg.Image.MimeType,
+		}
+		// Download and save media locally
+		waAccount := &whatsapp.Account{
+			PhoneID:     account.PhoneID,
+			BusinessID:  account.BusinessID,
+			APIVersion:  account.APIVersion,
+			AccessToken: account.AccessToken,
+		}
+		if localPath, err := a.DownloadAndSaveMedia(context.Background(), msg.Image.ID, msg.Image.MimeType, waAccount); err != nil {
+			a.Log.Error("Failed to download image", "error", err, "media_id", msg.Image.ID)
+		} else {
+			mediaInfo.MediaURL = localPath
+		}
+	} else if msg.Type == "document" && msg.Document != nil {
+		// Handle document message
+		messageText = msg.Document.Caption
+		mediaInfo = &MediaInfo{
+			MediaMimeType: msg.Document.MimeType,
+			MediaFilename: msg.Document.Filename,
+		}
+		// Download and save media locally
+		waAccount := &whatsapp.Account{
+			PhoneID:     account.PhoneID,
+			BusinessID:  account.BusinessID,
+			APIVersion:  account.APIVersion,
+			AccessToken: account.AccessToken,
+		}
+		if localPath, err := a.DownloadAndSaveMedia(context.Background(), msg.Document.ID, msg.Document.MimeType, waAccount); err != nil {
+			a.Log.Error("Failed to download document", "error", err, "media_id", msg.Document.ID)
+		} else {
+			mediaInfo.MediaURL = localPath
+		}
+	} else if msg.Type == "video" && msg.Video != nil {
+		// Handle video message
+		messageText = msg.Video.Caption
+		mediaInfo = &MediaInfo{
+			MediaMimeType: msg.Video.MimeType,
+		}
+		// Download and save media locally
+		waAccount := &whatsapp.Account{
+			PhoneID:     account.PhoneID,
+			BusinessID:  account.BusinessID,
+			APIVersion:  account.APIVersion,
+			AccessToken: account.AccessToken,
+		}
+		if localPath, err := a.DownloadAndSaveMedia(context.Background(), msg.Video.ID, msg.Video.MimeType, waAccount); err != nil {
+			a.Log.Error("Failed to download video", "error", err, "media_id", msg.Video.ID)
+		} else {
+			mediaInfo.MediaURL = localPath
+		}
+	} else if msg.Type == "audio" && msg.Audio != nil {
+		// Handle audio message
+		mediaInfo = &MediaInfo{
+			MediaMimeType: msg.Audio.MimeType,
+		}
+		// Download and save media locally
+		waAccount := &whatsapp.Account{
+			PhoneID:     account.PhoneID,
+			BusinessID:  account.BusinessID,
+			APIVersion:  account.APIVersion,
+			AccessToken: account.AccessToken,
+		}
+		if localPath, err := a.DownloadAndSaveMedia(context.Background(), msg.Audio.ID, msg.Audio.MimeType, waAccount); err != nil {
+			a.Log.Error("Failed to download audio", "error", err, "media_id", msg.Audio.ID)
+		} else {
+			mediaInfo.MediaURL = localPath
+		}
 	}
 
 	// Save incoming message to messages table (always, even if chatbot is disabled)
-	a.saveIncomingMessage(&account, contact, msg.ID, messageType, messageText)
+	a.saveIncomingMessage(&account, contact, msg.ID, messageType, messageText, mediaInfo)
 
 	// Check for active agent transfer - skip chatbot processing if transferred
 	if a.hasActiveAgentTransfer(account.OrganizationID, contact.ID) {
@@ -1671,8 +1767,15 @@ func (a *App) getSessionHistory(sessionID uuid.UUID, limit int) []models.Chatbot
 	return messages
 }
 
+// MediaInfo holds media-related information for an incoming message
+type MediaInfo struct {
+	MediaURL      string
+	MediaMimeType string
+	MediaFilename string
+}
+
 // saveIncomingMessage saves an incoming message to the messages table
-func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *models.Contact, whatsappMsgID, msgType, content string) {
+func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *models.Contact, whatsappMsgID, msgType, content string, mediaInfo *MediaInfo) {
 	now := time.Now()
 
 	message := models.Message{
@@ -1685,6 +1788,13 @@ func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *mode
 		MessageType:       msgType,
 		Content:           content,
 		Status:            "received",
+	}
+
+	// Add media fields if present
+	if mediaInfo != nil {
+		message.MediaURL = mediaInfo.MediaURL
+		message.MediaMimeType = mediaInfo.MediaMimeType
+		message.MediaFilename = mediaInfo.MediaFilename
 	}
 
 	if err := a.DB.Create(&message).Error; err != nil {
@@ -1708,7 +1818,7 @@ func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *mode
 		"whats_app_account":    account.Name,
 	})
 
-	a.Log.Info("Saved incoming message", "message_id", message.ID, "contact_id", contact.ID)
+	a.Log.Info("Saved incoming message", "message_id", message.ID, "contact_id", contact.ID, "media_url", message.MediaURL)
 
 	// Broadcast new message via WebSocket
 	if a.WSHub != nil {
@@ -1719,13 +1829,16 @@ func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *mode
 		a.WSHub.BroadcastToOrg(account.OrganizationID, websocket.WSMessage{
 			Type: websocket.TypeNewMessage,
 			Payload: map[string]any{
-				"id":               message.ID,
+				"id":               message.ID.String(),
 				"contact_id":       contact.ID.String(),
 				"assigned_user_id": assignedUserIDStr,
 				"profile_name":     contact.ProfileName,
 				"direction":        message.Direction,
 				"message_type":     message.MessageType,
 				"content":          map[string]string{"body": message.Content},
+				"media_url":        message.MediaURL,
+				"media_mime_type":  message.MediaMimeType,
+				"media_filename":   message.MediaFilename,
 				"status":           message.Status,
 				"wamid":            message.WhatsAppMessageID,
 				"created_at":       message.CreatedAt,

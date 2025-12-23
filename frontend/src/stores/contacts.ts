@@ -23,6 +23,9 @@ export interface Message {
   direction: 'incoming' | 'outgoing'
   message_type: string
   content: any
+  media_url?: string
+  media_mime_type?: string
+  media_filename?: string
   interactive_data?: {
     type?: string
     body?: string
@@ -116,13 +119,8 @@ export const useContactsStore = defineStore('contacts', () => {
       const response = await messagesService.send(contactId, { type, content })
       // API returns { status: "success", data: { ... } }
       const newMessage = response.data.data || response.data
-      messages.value.push(newMessage)
-
-      // Update contact's last message
-      const contact = contacts.value.find(c => c.id === contactId)
-      if (contact) {
-        contact.last_message_at = newMessage.created_at
-      }
+      // Use addMessage which has duplicate checking (WebSocket may also broadcast this)
+      addMessage(newMessage)
 
       return newMessage
     } catch (error) {
@@ -138,7 +136,8 @@ export const useContactsStore = defineStore('contacts', () => {
         components
       })
       const newMessage = response.data
-      messages.value.push(newMessage)
+      // Use addMessage which has duplicate checking (WebSocket may also broadcast this)
+      addMessage(newMessage)
       return newMessage
     } catch (error) {
       console.error('Failed to send template:', error)

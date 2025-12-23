@@ -72,6 +72,18 @@ const isAssignDialogOpen = ref(false)
 const isTransferring = ref(false)
 const isResuming = ref(false)
 
+// File upload state
+const fileInputRef = ref<HTMLInputElement | null>(null)
+const selectedFile = ref<File | null>(null)
+const filePreviewUrl = ref<string | null>(null)
+const isMediaDialogOpen = ref(false)
+const mediaCaption = ref('')
+const isUploadingMedia = ref(false)
+
+// Cache for media blob URLs (message_id -> blob URL)
+const mediaBlobUrls = ref<Record<string, string>>({})
+const mediaLoadingStates = ref<Record<string, boolean>>({})
+
 const contactId = computed(() => route.params.contactId as string | undefined)
 
 // Get active transfer for current contact from the store (reactive)
@@ -142,6 +154,11 @@ onUnmounted(() => {
   wsService.setCurrentContact(null)
   // Clear current contact when leaving chat view so notifications work on other pages
   contactsStore.setCurrentContact(null)
+  // Clean up blob URLs to prevent memory leaks
+  Object.values(mediaBlobUrls.value).forEach(url => {
+    URL.revokeObjectURL(url)
+  })
+  mediaBlobUrls.value = {}
 })
 
 // Watch for route changes
@@ -163,13 +180,22 @@ async function selectContact(id: string) {
     scrollToBottom()
     // Tell WebSocket server which contact we're viewing
     wsService.setCurrentContact(id)
+    // Load media for messages after messages are fetched
+    await nextTick()
+    loadMediaForMessages()
   }
 }
 
-// Watch for new messages to auto-scroll
+// Watch for new messages to auto-scroll and load media
 watch(() => contactsStore.messages.length, () => {
   scrollToBottom()
+  loadMediaForMessages()
 })
+
+// Watch for messages changes to load media
+watch(() => contactsStore.messages, () => {
+  loadMediaForMessages()
+}, { deep: true })
 
 function handleContactClick(contact: Contact) {
   router.push(`/chat/${contact.id}`)
@@ -334,11 +360,15 @@ function getMessageContent(message: Message): string {
     }
     return message.content?.body || '[Interactive Message]'
   }
-  if (message.message_type === 'image') {
-    return '[Image]'
+  // For media messages, return caption if available (media is displayed inline)
+  if (message.message_type === 'image' || message.message_type === 'video') {
+    return message.content?.body || ''
+  }
+  if (message.message_type === 'audio') {
+    return '' // Audio doesn't have captions
   }
   if (message.message_type === 'document') {
-    return '[Document]'
+    return message.content?.body || ''
   }
   if (message.message_type === 'template') {
     return '[Template Message]'
@@ -359,6 +389,195 @@ function getInteractiveButtons(message: Message): Array<{ id: string; title: str
     id: btn.reply?.id || btn.id || '',
     title: btn.reply?.title || btn.title || ''
   }))
+}
+
+function isMediaMessage(message: Message): boolean {
+  return ['image', 'video', 'audio', 'document'].includes(message.message_type)
+}
+
+function getMediaBlobUrl(message: Message): string {
+  return mediaBlobUrls.value[message.id] || ''
+}
+
+function isMediaLoading(message: Message): boolean {
+  return mediaLoadingStates.value[message.id] || false
+}
+
+async function loadMediaForMessage(message: Message) {
+  if (!message.media_url || mediaBlobUrls.value[message.id] || mediaLoadingStates.value[message.id]) {
+    return
+  }
+
+  mediaLoadingStates.value[message.id] = true
+
+  try {
+    const token = authStore.token
+    if (!token) {
+      console.error('No auth token available')
+      return
+    }
+
+    const response = await fetch(`/api/media/${message.id}`, {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    })
+
+    if (!response.ok) {
+      throw new Error(`Failed to load media: ${response.status}`)
+    }
+
+    const blob = await response.blob()
+    const blobUrl = URL.createObjectURL(blob)
+    mediaBlobUrls.value[message.id] = blobUrl
+  } catch (error) {
+    console.error('Failed to load media:', error, 'message_id:', message.id)
+  } finally {
+    mediaLoadingStates.value[message.id] = false
+  }
+}
+
+// Load media for all messages that have media_url
+function loadMediaForMessages() {
+  for (const message of contactsStore.messages) {
+    if (message.media_url && !mediaBlobUrls.value[message.id]) {
+      loadMediaForMessage(message)
+    }
+  }
+}
+
+function openMediaPreview(message: Message) {
+  const url = getMediaBlobUrl(message)
+  if (url) {
+    window.open(url, '_blank')
+  }
+}
+
+function handleImageError(event: Event) {
+  const img = event.target as HTMLImageElement
+  img.style.display = 'none'
+}
+
+function handleMediaError(event: Event, mediaType: string) {
+  console.error(`Failed to load ${mediaType}:`, event)
+}
+
+// File upload functions
+function openFilePicker() {
+  fileInputRef.value?.click()
+}
+
+function handleFileSelect(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+
+  // Validate file type
+  const allowedTypes = ['image/', 'video/', 'audio/', 'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument']
+  const isAllowed = allowedTypes.some(type => file.type.startsWith(type))
+  if (!isAllowed) {
+    toast.error('Unsupported file type', {
+      description: 'Please select an image, video, audio, or document file'
+    })
+    return
+  }
+
+  // Validate file size (16MB limit for WhatsApp)
+  const maxSize = 16 * 1024 * 1024
+  if (file.size > maxSize) {
+    toast.error('File too large', {
+      description: 'Maximum file size is 16MB'
+    })
+    return
+  }
+
+  selectedFile.value = file
+  mediaCaption.value = ''
+
+  // Create preview URL for images and videos
+  if (file.type.startsWith('image/') || file.type.startsWith('video/')) {
+    filePreviewUrl.value = URL.createObjectURL(file)
+  } else {
+    filePreviewUrl.value = null
+  }
+
+  isMediaDialogOpen.value = true
+
+  // Reset input so same file can be selected again
+  input.value = ''
+}
+
+function closeMediaDialog() {
+  isMediaDialogOpen.value = false
+  if (filePreviewUrl.value) {
+    URL.revokeObjectURL(filePreviewUrl.value)
+    filePreviewUrl.value = null
+  }
+  selectedFile.value = null
+  mediaCaption.value = ''
+}
+
+function getMediaType(mimeType: string): string {
+  if (mimeType.startsWith('image/')) return 'image'
+  if (mimeType.startsWith('video/')) return 'video'
+  if (mimeType.startsWith('audio/')) return 'audio'
+  return 'document'
+}
+
+async function sendMediaMessage() {
+  if (!selectedFile.value || !contactsStore.currentContact) return
+
+  isUploadingMedia.value = true
+  try {
+    const formData = new FormData()
+    formData.append('file', selectedFile.value)
+    formData.append('contact_id', contactsStore.currentContact.id)
+    formData.append('type', getMediaType(selectedFile.value.type))
+    if (mediaCaption.value.trim()) {
+      formData.append('caption', mediaCaption.value.trim())
+    }
+
+    const token = authStore.token
+    if (!token) {
+      toast.error('Authentication required')
+      return
+    }
+
+    const response = await fetch('/api/messages/media', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      },
+      body: formData
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(error.message || 'Failed to send media')
+    }
+
+    const result = await response.json()
+
+    // Add the message to the store (addMessage has duplicate checking for WebSocket)
+    if (result.data) {
+      contactsStore.addMessage(result.data)
+      scrollToBottom()
+      // Load media for the new message
+      await nextTick()
+      if (result.data.media_url) {
+        loadMediaForMessage(result.data)
+      }
+    }
+
+    toast.success('Media sent successfully')
+    closeMediaDialog()
+  } catch (error: any) {
+    toast.error('Failed to send media', {
+      description: error.message || 'Please try again'
+    })
+  } finally {
+    isUploadingMedia.value = false
+  }
 }
 </script>
 
@@ -545,7 +764,79 @@ function getInteractiveButtons(message: Message): Array<{ id: string; title: str
                   message.direction === 'outgoing' ? 'chat-bubble-outgoing' : 'chat-bubble-incoming'
                 ]"
               >
-                <p class="whitespace-pre-wrap break-words">{{ getMessageContent(message) }}</p>
+                <!-- Image message -->
+                <div v-if="message.message_type === 'image' && message.media_url" class="mb-2">
+                  <div v-if="isMediaLoading(message)" class="w-[200px] h-[150px] bg-muted rounded-lg animate-pulse flex items-center justify-center">
+                    <span class="text-muted-foreground text-sm">Loading...</span>
+                  </div>
+                  <img
+                    v-else-if="getMediaBlobUrl(message)"
+                    :src="getMediaBlobUrl(message)"
+                    :alt="message.content?.body || 'Image'"
+                    class="max-w-[280px] max-h-[300px] rounded-lg cursor-pointer object-cover"
+                    @click="openMediaPreview(message)"
+                    @error="handleImageError($event)"
+                  />
+                  <div v-else class="w-[200px] h-[150px] bg-muted rounded-lg flex items-center justify-center">
+                    <span class="text-muted-foreground text-sm">[Image]</span>
+                  </div>
+                </div>
+                <!-- Video message -->
+                <div v-else-if="message.message_type === 'video' && message.media_url" class="mb-2">
+                  <div v-if="isMediaLoading(message)" class="w-[200px] h-[150px] bg-muted rounded-lg animate-pulse flex items-center justify-center">
+                    <span class="text-muted-foreground text-sm">Loading...</span>
+                  </div>
+                  <video
+                    v-else-if="getMediaBlobUrl(message)"
+                    :src="getMediaBlobUrl(message)"
+                    controls
+                    class="max-w-[280px] max-h-[300px] rounded-lg"
+                    @error="handleMediaError($event, 'video')"
+                  />
+                  <div v-else class="w-[200px] h-[150px] bg-muted rounded-lg flex items-center justify-center">
+                    <span class="text-muted-foreground text-sm">[Video]</span>
+                  </div>
+                </div>
+                <!-- Audio message -->
+                <div v-else-if="message.message_type === 'audio' && message.media_url" class="mb-2">
+                  <div v-if="isMediaLoading(message)" class="w-[200px] h-[40px] bg-muted rounded-lg animate-pulse"></div>
+                  <audio
+                    v-else-if="getMediaBlobUrl(message)"
+                    :src="getMediaBlobUrl(message)"
+                    controls
+                    class="max-w-[280px]"
+                    @error="handleMediaError($event, 'audio')"
+                  />
+                  <div v-else class="text-muted-foreground text-sm">[Audio]</div>
+                </div>
+                <!-- Document message -->
+                <div v-else-if="message.message_type === 'document' && message.media_url" class="mb-2">
+                  <a
+                    v-if="getMediaBlobUrl(message)"
+                    :href="getMediaBlobUrl(message)"
+                    :download="message.media_filename || 'document'"
+                    class="flex items-center gap-2 px-3 py-2 bg-background/50 rounded-lg hover:bg-background/80 transition-colors"
+                  >
+                    <FileText class="h-5 w-5 text-muted-foreground" />
+                    <span class="text-sm truncate max-w-[200px]">
+                      {{ message.media_filename || 'Document' }}
+                    </span>
+                  </a>
+                  <div v-else-if="isMediaLoading(message)" class="flex items-center gap-2 px-3 py-2 bg-background/50 rounded-lg">
+                    <FileText class="h-5 w-5 text-muted-foreground" />
+                    <span class="text-sm text-muted-foreground">Loading...</span>
+                  </div>
+                  <div v-else class="flex items-center gap-2 px-3 py-2 bg-background/50 rounded-lg">
+                    <FileText class="h-5 w-5 text-muted-foreground" />
+                    <span class="text-sm text-muted-foreground">[Document]</span>
+                  </div>
+                </div>
+                <!-- Text content (for text messages or captions) -->
+                <p v-if="getMessageContent(message)" class="whitespace-pre-wrap break-words">{{ getMessageContent(message) }}</p>
+                <!-- Fallback for media without URL -->
+                <p v-else-if="isMediaMessage(message) && !message.media_url" class="text-muted-foreground italic">
+                  [{{ message.message_type.charAt(0).toUpperCase() + message.message_type.slice(1) }}]
+                </p>
                 <!-- Interactive buttons -->
                 <div
                   v-if="getInteractiveButtons(message).length > 0"
@@ -592,12 +883,19 @@ function getInteractiveButtons(message: Message): Array<{ id: string; title: str
               </Tooltip>
               <Tooltip>
                 <TooltipTrigger as-child>
-                  <Button type="button" variant="ghost" size="icon">
+                  <Button type="button" variant="ghost" size="icon" @click="openFilePicker">
                     <Paperclip class="h-5 w-5" />
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>Attach file</TooltipContent>
               </Tooltip>
+              <input
+                ref="fileInputRef"
+                type="file"
+                accept="image/*,video/*,audio/*,.pdf,.doc,.docx"
+                class="hidden"
+                @change="handleFileSelect"
+              />
             </div>
             <Textarea
               v-model="messageInput"
@@ -655,6 +953,84 @@ function getInteractiveButtons(message: Message): Array<{ id: string; title: str
               {{ user.role }}
             </Badge>
           </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+
+    <!-- Media Preview Dialog -->
+    <Dialog v-model:open="isMediaDialogOpen">
+      <DialogContent class="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Send Media</DialogTitle>
+          <DialogDescription>
+            {{ selectedFile?.name }}
+          </DialogDescription>
+        </DialogHeader>
+        <div class="py-4 space-y-4">
+          <!-- Image preview -->
+          <div v-if="selectedFile?.type.startsWith('image/') && filePreviewUrl" class="flex justify-center">
+            <img
+              :src="filePreviewUrl"
+              :alt="selectedFile.name"
+              class="max-w-full max-h-[300px] rounded-lg object-contain"
+            />
+          </div>
+          <!-- Video preview -->
+          <div v-else-if="selectedFile?.type.startsWith('video/') && filePreviewUrl" class="flex justify-center">
+            <video
+              :src="filePreviewUrl"
+              controls
+              class="max-w-full max-h-[300px] rounded-lg"
+            />
+          </div>
+          <!-- Audio preview -->
+          <div v-else-if="selectedFile?.type.startsWith('audio/')" class="flex justify-center">
+            <div class="flex items-center gap-3 px-4 py-3 bg-muted rounded-lg">
+              <div class="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
+                <Paperclip class="h-5 w-5 text-primary" />
+              </div>
+              <div>
+                <p class="font-medium text-sm">{{ selectedFile.name }}</p>
+                <p class="text-xs text-muted-foreground">Audio file</p>
+              </div>
+            </div>
+          </div>
+          <!-- Document preview -->
+          <div v-else-if="selectedFile" class="flex justify-center">
+            <div class="flex items-center gap-3 px-4 py-3 bg-muted rounded-lg">
+              <div class="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
+                <FileText class="h-5 w-5 text-primary" />
+              </div>
+              <div>
+                <p class="font-medium text-sm truncate max-w-[200px]">{{ selectedFile.name }}</p>
+                <p class="text-xs text-muted-foreground">
+                  {{ (selectedFile.size / 1024).toFixed(1) }} KB
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Caption input (not for audio) -->
+          <div v-if="selectedFile && !selectedFile.type.startsWith('audio/')">
+            <Textarea
+              v-model="mediaCaption"
+              placeholder="Add a caption..."
+              class="min-h-[60px] max-h-[100px] resize-none"
+              :rows="2"
+            />
+          </div>
+
+          <!-- Actions -->
+          <div class="flex justify-end gap-2">
+            <Button variant="outline" @click="closeMediaDialog" :disabled="isUploadingMedia">
+              Cancel
+            </Button>
+            <Button @click="sendMediaMessage" :disabled="isUploadingMedia">
+              <Send v-if="!isUploadingMedia" class="mr-2 h-4 w-4" />
+              <span v-if="isUploadingMedia">Sending...</span>
+              <span v-else>Send</span>
+            </Button>
+          </div>
         </div>
       </DialogContent>
     </Dialog>

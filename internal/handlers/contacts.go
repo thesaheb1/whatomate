@@ -2,16 +2,21 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/shridarpatil/whatomate/internal/websocket"
+	"github.com/shridarpatil/whatomate/pkg/whatsapp"
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/fastglue"
 )
@@ -40,6 +45,9 @@ type MessageResponse struct {
 	Direction       string       `json:"direction"`
 	MessageType     string       `json:"message_type"`
 	Content         any          `json:"content"`
+	MediaURL        string       `json:"media_url,omitempty"`
+	MediaMimeType   string       `json:"media_mime_type,omitempty"`
+	MediaFilename   string       `json:"media_filename,omitempty"`
 	InteractiveData models.JSONB `json:"interactive_data,omitempty"`
 	Status          string       `json:"status"`
 	WAMID           string       `json:"wamid"`
@@ -263,6 +271,9 @@ func (a *App) GetMessages(r *fastglue.Request) error {
 			Direction:       m.Direction,
 			MessageType:     m.MessageType,
 			Content:         content,
+			MediaURL:        m.MediaURL,
+			MediaMimeType:   m.MediaMimeType,
+			MediaFilename:   m.MediaFilename,
 			InteractiveData: m.InteractiveData,
 			Status:          m.Status,
 			WAMID:           m.WhatsAppMessageID,
@@ -495,4 +506,273 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// SendMediaMessage sends a media message (image, document, video, audio) to a contact
+func (a *App) SendMediaMessage(r *fastglue.Request) error {
+	orgID := r.RequestCtx.UserValue("organization_id").(uuid.UUID)
+	userID, _ := r.RequestCtx.UserValue("user_id").(uuid.UUID)
+	userRole, _ := r.RequestCtx.UserValue("role").(string)
+
+	// Parse multipart form
+	form, err := r.RequestCtx.MultipartForm()
+	if err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid multipart form", nil, "")
+	}
+
+	// Get contact ID from form
+	contactIDValues := form.Value["contact_id"]
+	if len(contactIDValues) == 0 {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "contact_id is required", nil, "")
+	}
+	contactID, err := uuid.Parse(contactIDValues[0])
+	if err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid contact ID", nil, "")
+	}
+
+	// Get media type (image, document, video, audio)
+	mediaType := "image"
+	if typeValues := form.Value["type"]; len(typeValues) > 0 {
+		mediaType = typeValues[0]
+	}
+
+	// Get caption (optional)
+	caption := ""
+	if captionValues := form.Value["caption"]; len(captionValues) > 0 {
+		caption = captionValues[0]
+	}
+
+	// Get uploaded file
+	files := form.File["file"]
+	if len(files) == 0 {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "file is required", nil, "")
+	}
+	fileHeader := files[0]
+
+	// Open the file
+	file, err := fileHeader.Open()
+	if err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Failed to read file", nil, "")
+	}
+	defer file.Close()
+
+	// Read file data
+	fileData, err := io.ReadAll(file)
+	if err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to read file data", nil, "")
+	}
+
+	// Get MIME type
+	mimeType := fileHeader.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+
+	// Get contact (agents can only message their assigned contacts)
+	var contact models.Contact
+	query := a.DB.Where("id = ? AND organization_id = ?", contactID, orgID)
+	if userRole == "agent" {
+		query = query.Where("assigned_user_id = ?", userID)
+	}
+	if err := query.First(&contact).Error; err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Contact not found", nil, "")
+	}
+
+	// Get WhatsApp account
+	var account models.WhatsAppAccount
+	if contact.WhatsAppAccount != "" {
+		if err := a.DB.Where("name = ? AND organization_id = ?", contact.WhatsAppAccount, orgID).First(&account).Error; err != nil {
+			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "WhatsApp account not found", nil, "")
+		}
+	} else {
+		// Get default outgoing account
+		if err := a.DB.Where("organization_id = ? AND is_default_outgoing = ?", orgID, true).First(&account).Error; err != nil {
+			if err := a.DB.Where("organization_id = ?", orgID).First(&account).Error; err != nil {
+				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "No WhatsApp account configured", nil, "")
+			}
+		}
+	}
+
+	// Save file locally
+	waAccount := &whatsapp.Account{
+		PhoneID:     account.PhoneID,
+		BusinessID:  account.BusinessID,
+		APIVersion:  account.APIVersion,
+		AccessToken: account.AccessToken,
+	}
+
+	// Save locally first
+	localPath, err := a.saveMediaLocally(fileData, mimeType, fileHeader.Filename)
+	if err != nil {
+		a.Log.Error("Failed to save media locally", "error", err)
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to save media", nil, "")
+	}
+
+	// Create message record first
+	message := models.Message{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  orgID,
+		WhatsAppAccount: account.Name,
+		ContactID:       contactID,
+		Direction:       "outgoing",
+		MessageType:     mediaType,
+		Content:         caption,
+		MediaURL:        localPath,
+		MediaMimeType:   mimeType,
+		MediaFilename:   fileHeader.Filename,
+		Status:          "pending",
+	}
+
+	if err := a.DB.Create(&message).Error; err != nil {
+		a.Log.Error("Failed to create message", "error", err)
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create message", nil, "")
+	}
+
+	// Upload to WhatsApp and send asynchronously
+	go a.uploadAndSendMediaMessage(waAccount, &account, &contact, &message, fileData, mimeType, fileHeader.Filename, caption)
+
+	// Update contact's last message
+	now := time.Now()
+	preview := "[" + mediaType + "]"
+	if caption != "" {
+		preview = caption
+		if len(preview) > 100 {
+			preview = preview[:97] + "..."
+		}
+	}
+	a.DB.Model(&contact).Updates(map[string]any{
+		"last_message_at":      now,
+		"last_message_preview": preview,
+	})
+
+	response := MessageResponse{
+		ID:            message.ID,
+		ContactID:     message.ContactID,
+		Direction:     message.Direction,
+		MessageType:   message.MessageType,
+		Content:       map[string]string{"body": message.Content},
+		MediaURL:      message.MediaURL,
+		MediaMimeType: message.MediaMimeType,
+		MediaFilename: message.MediaFilename,
+		Status:        message.Status,
+		CreatedAt:     message.CreatedAt,
+		UpdatedAt:     message.UpdatedAt,
+	}
+
+	// Broadcast new outgoing message via WebSocket
+	if a.WSHub != nil {
+		a.WSHub.BroadcastToOrg(orgID, websocket.WSMessage{
+			Type: websocket.TypeNewMessage,
+			Payload: map[string]any{
+				"id":              message.ID.String(),
+				"contact_id":     message.ContactID.String(),
+				"direction":      message.Direction,
+				"message_type":   message.MessageType,
+				"content":        map[string]string{"body": message.Content},
+				"media_url":      message.MediaURL,
+				"media_mime_type": message.MediaMimeType,
+				"media_filename": message.MediaFilename,
+				"status":         message.Status,
+				"created_at":     message.CreatedAt,
+				"updated_at":     message.UpdatedAt,
+			},
+		})
+	}
+
+	return r.SendEnvelope(response)
+}
+
+// saveMediaLocally saves media data to local storage and returns the relative path
+func (a *App) saveMediaLocally(data []byte, mimeType, filename string) (string, error) {
+	// Determine subdirectory based on MIME type
+	var subdir string
+	switch {
+	case strings.HasPrefix(mimeType, "image/"):
+		subdir = "images"
+	case strings.HasPrefix(mimeType, "video/"):
+		subdir = "videos"
+	case strings.HasPrefix(mimeType, "audio/"):
+		subdir = "audio"
+	default:
+		subdir = "documents"
+	}
+
+	// Ensure directory exists
+	if err := a.ensureMediaDir(subdir); err != nil {
+		return "", fmt.Errorf("failed to create media directory: %w", err)
+	}
+
+	// Get extension from MIME type or filename
+	ext := getExtensionFromMimeType(mimeType)
+	if ext == "" {
+		// Try to get from filename
+		if dotIdx := strings.LastIndex(filename, "."); dotIdx >= 0 {
+			ext = filename[dotIdx:]
+		} else {
+			ext = ".bin"
+		}
+	}
+
+	// Generate unique filename
+	newFilename := uuid.New().String() + ext
+	filePath := filepath.Join(a.getMediaStoragePath(), subdir, newFilename)
+
+	// Save file
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		return "", fmt.Errorf("failed to save media file: %w", err)
+	}
+
+	// Return relative path
+	relativePath := filepath.Join(subdir, newFilename)
+	a.Log.Info("Media saved locally", "path", relativePath, "size", len(data))
+
+	return relativePath, nil
+}
+
+// uploadAndSendMediaMessage uploads media to WhatsApp and sends the message
+func (a *App) uploadAndSendMediaMessage(waAccount *whatsapp.Account, account *models.WhatsAppAccount, contact *models.Contact, message *models.Message, data []byte, mimeType, filename, caption string) {
+	ctx := context.Background()
+
+	// Upload media to WhatsApp
+	mediaID, err := a.WhatsApp.UploadMedia(ctx, waAccount, data, mimeType, filename)
+	if err != nil {
+		a.Log.Error("Failed to upload media to WhatsApp", "error", err)
+		a.DB.Model(message).Updates(map[string]any{
+			"status":        "failed",
+			"error_message": "Failed to upload media: " + err.Error(),
+		})
+		return
+	}
+
+	// Send the media message
+	var wamID string
+	switch message.MessageType {
+	case "image":
+		wamID, err = a.WhatsApp.SendImageMessage(ctx, waAccount, contact.PhoneNumber, mediaID, caption)
+	case "document":
+		wamID, err = a.WhatsApp.SendDocumentMessage(ctx, waAccount, contact.PhoneNumber, mediaID, filename, caption)
+	case "video":
+		wamID, err = a.WhatsApp.SendVideoMessage(ctx, waAccount, contact.PhoneNumber, mediaID, caption)
+	case "audio":
+		wamID, err = a.WhatsApp.SendAudioMessage(ctx, waAccount, contact.PhoneNumber, mediaID)
+	default:
+		err = fmt.Errorf("unsupported media type: %s", message.MessageType)
+	}
+
+	if err != nil {
+		a.Log.Error("Failed to send media message", "error", err)
+		a.DB.Model(message).Updates(map[string]any{
+			"status":        "failed",
+			"error_message": err.Error(),
+		})
+		return
+	}
+
+	// Update message with WhatsApp message ID
+	a.DB.Model(message).Updates(map[string]any{
+		"status":              "sent",
+		"whatsapp_message_id": wamID,
+	})
+
+	a.Log.Info("Media message sent", "message_id", message.ID, "wamid", wamID, "type", message.MessageType)
 }
