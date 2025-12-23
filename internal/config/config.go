@@ -32,6 +32,7 @@ type ServerConfig struct {
 	Port         int    `koanf:"port"`
 	ReadTimeout  int    `koanf:"read_timeout"`
 	WriteTimeout int    `koanf:"write_timeout"`
+	BasePath     string `koanf:"base_path"` // Base path for frontend (e.g., "/whatomate" for proxy pass)
 }
 
 type DatabaseConfig struct {

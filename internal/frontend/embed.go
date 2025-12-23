@@ -2,6 +2,7 @@ package frontend
 
 import (
 	"embed"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -13,13 +14,30 @@ import (
 //go:embed dist/*
 var distFS embed.FS
 
+// cachedIndexHTML stores the modified index.html with injected base path
+var cachedIndexHTML []byte
+
 // Handler returns a fasthttp handler that serves the embedded frontend files
-func Handler() fasthttp.RequestHandler {
+// basePath should be empty string for root deployment or "/subpath" for subdirectory
+func Handler(basePath string) fasthttp.RequestHandler {
+	// Normalize base path
+	basePath = strings.TrimSuffix(basePath, "/")
+
 	// Get the dist subdirectory
 	distSubFS, err := fs.Sub(distFS, "dist")
 	if err != nil {
 		panic("failed to get dist subdirectory: " + err.Error())
 	}
+
+	// Read and modify index.html to inject base path
+	indexContent, err := fs.ReadFile(distSubFS, "index.html")
+	if err != nil {
+		panic("failed to read index.html: " + err.Error())
+	}
+
+	// Inject base path script before </head>
+	basePathScript := fmt.Sprintf(`<script>window.__BASE_PATH__ = "%s";</script></head>`, basePath)
+	cachedIndexHTML = []byte(strings.Replace(string(indexContent), "</head>", basePathScript, 1))
 
 	// Create file server
 	fileServer := http.FileServer(http.FS(distSubFS))
@@ -38,10 +56,10 @@ func Handler() fasthttp.RequestHandler {
 			}
 		}
 
-		// For root or non-existent files (SPA routes), serve index.html
+		// For root or non-existent files (SPA routes), serve modified index.html
 		if path == "/" || (!strings.HasPrefix(path, "/api") && !strings.Contains(path, ".")) {
-			r.URL.Path = "/"
-			fileServer.ServeHTTP(w, r)
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Write(cachedIndexHTML)
 			return
 		}
 

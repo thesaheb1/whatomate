@@ -110,7 +110,7 @@ func main() {
 	g.Before(middleware.Recovery(lo))
 
 	// Setup routes
-	setupRoutes(g, app, lo)
+	setupRoutes(g, app, lo, cfg.Server.BasePath)
 
 	// Create server
 	server := &fasthttp.Server{
@@ -141,7 +141,7 @@ func main() {
 	lo.Info("Server stopped")
 }
 
-func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger) {
+func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePath string) {
 	// Health check
 	g.GET("/health", app.HealthCheck)
 	g.GET("/ready", app.ReadyCheck)
@@ -365,8 +365,8 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger) {
 
 	// Serve embedded frontend (SPA)
 	if frontend.IsEmbedded() {
-		lo.Info("Serving embedded frontend")
-		frontendHandler := frontend.Handler()
+		lo.Info("Serving embedded frontend", "base_path", basePath)
+		frontendHandler := frontend.Handler(basePath)
 		// Catch-all for frontend routes
 		g.GET("/{path:*}", func(r *fastglue.Request) error {
 			frontendHandler(r.RequestCtx)

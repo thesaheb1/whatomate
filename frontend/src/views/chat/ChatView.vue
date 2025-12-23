@@ -417,7 +417,8 @@ async function loadMediaForMessage(message: Message) {
       return
     }
 
-    const response = await fetch(`/api/media/${message.id}`, {
+    const basePath = ((window as any).__BASE_PATH__ ?? '').replace(/\/$/, '')
+    const response = await fetch(`${basePath}/api/media/${message.id}`, {
       headers: {
         'Authorization': `Bearer ${token}`
       }
@@ -543,7 +544,8 @@ async function sendMediaMessage() {
       return
     }
 
-    const response = await fetch('/api/messages/media', {
+    const basePath = ((window as any).__BASE_PATH__ ?? '').replace(/\/$/, '')
+    const response = await fetch(`${basePath}/api/messages/media`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`

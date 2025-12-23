@@ -9,8 +9,12 @@ declare module 'vue-router' {
   }
 }
 
+// Get base path from server-injected config or fallback to Vite's BASE_URL
+const basePath = (window as any).__BASE_PATH__ ?? import.meta.env.BASE_URL ?? '/'
+const normalizedBasePath = basePath.endsWith('/') ? basePath : basePath + '/'
+
 const router = createRouter({
-  history: createWebHistory(import.meta.env.BASE_URL),
+  history: createWebHistory(normalizedBasePath),
   routes: [
     {
       path: '/login',

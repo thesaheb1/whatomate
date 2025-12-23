@@ -71,7 +71,8 @@ class WebSocketService {
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const host = window.location.host
-    const url = `${protocol}//${host}/ws?token=${token}`
+    const basePath = ((window as any).__BASE_PATH__ ?? '').replace(/\/$/, '')
+    const url = `${protocol}//${host}${basePath}/ws?token=${token}`
 
     console.log('Connecting to WebSocket:', url)
 
