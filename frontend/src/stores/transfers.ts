@@ -12,6 +12,8 @@ export interface AgentTransfer {
   source: 'manual' | 'flow' | 'keyword'
   agent_id?: string
   agent_name?: string
+  transferred_by?: string
+  transferred_by_name?: string
   notes?: string
   transferred_at: string
   resumed_at?: string

@@ -85,7 +85,9 @@ const allActiveTransfers = computed(() =>
 )
 
 const resumedTransfers = computed(() =>
-  transfersStore.transfers.filter(t => t.status === 'resumed')
+  transfersStore.transfers
+    .filter(t => t.status === 'resumed')
+    .sort((a, b) => new Date(b.resumed_at || b.transferred_at).getTime() - new Date(a.resumed_at || a.transferred_at).getTime())
 )
 
 // Auto-refresh interval for real-time updates
@@ -552,6 +554,7 @@ function getSourceBadge(source: string) {
                       <TableRow>
                         <TableHead>Contact</TableHead>
                         <TableHead>Phone</TableHead>
+                        <TableHead>Transferred By</TableHead>
                         <TableHead>Handled By</TableHead>
                         <TableHead>Transferred At</TableHead>
                         <TableHead>Resumed At</TableHead>
@@ -561,6 +564,7 @@ function getSourceBadge(source: string) {
                       <TableRow v-for="transfer in resumedTransfers" :key="transfer.id">
                         <TableCell class="font-medium">{{ transfer.contact_name }}</TableCell>
                         <TableCell>{{ transfer.phone_number }}</TableCell>
+                        <TableCell>{{ transfer.transferred_by_name || 'System' }}</TableCell>
                         <TableCell>{{ transfer.agent_name || '-' }}</TableCell>
                         <TableCell>{{ formatDate(transfer.transferred_at) }}</TableCell>
                         <TableCell>{{ transfer.resumed_at ? formatDate(transfer.resumed_at) : '-' }}</TableCell>
