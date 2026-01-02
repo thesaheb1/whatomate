@@ -227,8 +227,8 @@ export const chatbotService = {
   }) => api.post('/chatbot/transfers', data),
   pickNextTransfer: () => api.post('/chatbot/transfers/pick'),
   resumeTransfer: (id: string) => api.put(`/chatbot/transfers/${id}/resume`),
-  assignTransfer: (id: string, agentId: string | null) =>
-    api.put(`/chatbot/transfers/${id}/assign`, { agent_id: agentId })
+  assignTransfer: (id: string, agentId: string | null, teamId?: string | null) =>
+    api.put(`/chatbot/transfers/${id}/assign`, { agent_id: agentId, team_id: teamId })
 }
 
 export interface CannedResponse {

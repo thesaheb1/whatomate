@@ -65,6 +65,7 @@ const activeTab = ref('my-transfers')
 const assignDialogOpen = ref(false)
 const transferToAssign = ref<AgentTransfer | null>(null)
 const selectedAgentId = ref<string>('')
+const selectedTeamId = ref<string>('')
 const agents = ref<{ id: string; full_name: string }[]>([])
 const teams = ref<Team[]>([])
 const selectedTeamFilter = ref<string>('all')
@@ -239,6 +240,7 @@ async function resumeTransfer(transfer: AgentTransfer) {
 async function openAssignDialog(transfer: AgentTransfer) {
   transferToAssign.value = transfer
   selectedAgentId.value = transfer.agent_id || 'unassigned'
+  selectedTeamId.value = transfer.team_id || 'general'
   assignDialogOpen.value = true
 
   // Fetch agents if not already loaded
@@ -254,11 +256,20 @@ async function assignTransfer() {
   try {
     // Map "unassigned" to null for the API
     const agentId = selectedAgentId.value === 'unassigned' ? null : selectedAgentId.value
+    // Map "general" to empty string (general queue), otherwise pass team_id
+    // Only pass team_id if it changed from the original
+    const originalTeamId = transferToAssign.value.team_id || 'general'
+    let teamId: string | null | undefined = undefined
+    if (selectedTeamId.value !== originalTeamId) {
+      teamId = selectedTeamId.value === 'general' ? '' : selectedTeamId.value
+    }
+
     await chatbotService.assignTransfer(
       transferToAssign.value.id,
-      agentId
+      agentId,
+      teamId
     )
-    toast.success('Transfer assigned')
+    toast.success('Transfer updated')
     assignDialogOpen.value = false
     await fetchTransfers()
   } catch (error: any) {
@@ -737,16 +748,32 @@ function formatTimeRemaining(deadline: string | undefined): string {
     <Dialog v-model:open="assignDialogOpen">
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Assign Transfer</DialogTitle>
+          <DialogTitle>Reassign Transfer</DialogTitle>
           <DialogDescription>
-            Assign this transfer to an agent
+            Change agent or team assignment
           </DialogDescription>
         </DialogHeader>
 
         <div class="space-y-4 py-4">
-          <div v-if="transferToAssign" class="text-sm">
+          <div v-if="transferToAssign" class="text-sm border rounded-lg p-3 bg-muted/50">
             <p><strong>Contact:</strong> {{ transferToAssign.contact_name }}</p>
             <p><strong>Phone:</strong> {{ transferToAssign.phone_number }}</p>
+          </div>
+
+          <div class="space-y-2">
+            <label class="text-sm font-medium">Team Queue</label>
+            <Select v-model="selectedTeamId">
+              <SelectTrigger>
+                <SelectValue placeholder="Select a team" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="general">General Queue</SelectItem>
+                <SelectItem v-for="team in teams" :key="team.id" :value="team.id">
+                  {{ team.name }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p class="text-xs text-muted-foreground">Move transfer to a different team's queue</p>
           </div>
 
           <div class="space-y-2">
@@ -756,12 +783,13 @@ function formatTimeRemaining(deadline: string | undefined): string {
                 <SelectValue placeholder="Select an agent" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="unassigned">Unassigned (back to queue)</SelectItem>
+                <SelectItem value="unassigned">Unassigned (in queue)</SelectItem>
                 <SelectItem v-for="agent in agents" :key="agent.id" :value="agent.id">
                   {{ agent.full_name }}
                 </SelectItem>
               </SelectContent>
             </Select>
+            <p class="text-xs text-muted-foreground">Directly assign to an agent or leave in queue</p>
           </div>
         </div>
 
@@ -769,7 +797,7 @@ function formatTimeRemaining(deadline: string | undefined): string {
           <Button variant="outline" size="sm" @click="assignDialogOpen = false">Cancel</Button>
           <Button size="sm" @click="assignTransfer" :disabled="isAssigning">
             <Loader2 v-if="isAssigning" class="mr-2 h-4 w-4 animate-spin" />
-            Assign
+            Save
           </Button>
         </DialogFooter>
       </DialogContent>
