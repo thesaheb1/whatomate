@@ -1609,17 +1609,15 @@ func (a *App) generateAIResponse(settings *models.ChatbotSettings, session *mode
 
 // buildAIContext fetches and combines all AI context data
 func (a *App) buildAIContext(orgID uuid.UUID, session *models.ChatbotSession, userMessage string) string {
-	var contexts []models.AIContext
-	query := a.DB.Where("organization_id = ? AND is_enabled = true", orgID)
-
-	// Include org-level and account-specific contexts
-	if session != nil && session.WhatsAppAccount != "" {
-		query = query.Where("whats_app_account = ? OR whats_app_account = ''", session.WhatsAppAccount)
+	// Get WhatsApp account for cache key
+	whatsAppAccount := ""
+	if session != nil {
+		whatsAppAccount = session.WhatsAppAccount
 	}
 
-	query.Order("priority DESC").Find(&contexts)
-
-	if len(contexts) == 0 {
+	// Use cached AI contexts
+	contexts, err := a.getAIContextsCached(orgID, whatsAppAccount)
+	if err != nil || len(contexts) == 0 {
 		return ""
 	}
 

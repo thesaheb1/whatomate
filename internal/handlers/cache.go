@@ -19,6 +19,7 @@ const (
 	whatsappAccountCacheTTL = 6 * time.Hour
 	webhooksCacheTTL        = 6 * time.Hour
 	slaSettingsCacheTTL     = 6 * time.Hour
+	aiContextsCacheTTL      = 6 * time.Hour
 
 	// Cache key prefixes
 	settingsCachePrefix        = "chatbot:settings:"
@@ -27,6 +28,7 @@ const (
 	whatsappAccountCachePrefix = "whatsapp:account:"
 	webhooksCachePrefix        = "webhooks:"
 	slaSettingsCacheKey        = "chatbot:sla_enabled_settings"
+	aiContextsCachePrefix      = "chatbot:ai_contexts:"
 )
 
 // getChatbotSettingsCached retrieves chatbot settings from cache or database
@@ -293,4 +295,53 @@ func (a *App) getSLAEnabledSettingsCached() ([]models.ChatbotSettings, error) {
 func (a *App) InvalidateSLASettingsCache() {
 	ctx := context.Background()
 	a.Redis.Del(ctx, slaSettingsCacheKey)
+}
+
+// getAIContextsCached retrieves AI contexts from cache or database
+func (a *App) getAIContextsCached(orgID uuid.UUID, whatsAppAccount string) ([]models.AIContext, error) {
+	ctx := context.Background()
+	cacheKey := fmt.Sprintf("%s%s:%s", aiContextsCachePrefix, orgID.String(), whatsAppAccount)
+
+	// Try cache first
+	cached, err := a.Redis.Get(ctx, cacheKey).Result()
+	if err == nil && cached != "" {
+		var contexts []models.AIContext
+		if err := json.Unmarshal([]byte(cached), &contexts); err == nil {
+			return contexts, nil
+		}
+	}
+
+	// Cache miss - fetch from database (account-specific + global)
+	var contexts []models.AIContext
+
+	// Get account-specific contexts
+	var accountContexts []models.AIContext
+	a.DB.Where("organization_id = ? AND whats_app_account = ? AND is_enabled = true",
+		orgID, whatsAppAccount).
+		Order("priority DESC").
+		Find(&accountContexts)
+
+	// Get global contexts (whats_app_account = '')
+	var globalContexts []models.AIContext
+	a.DB.Where("organization_id = ? AND whats_app_account = '' AND is_enabled = true",
+		orgID).
+		Order("priority DESC").
+		Find(&globalContexts)
+
+	// Merge: account-specific first, then global
+	contexts = append(accountContexts, globalContexts...)
+
+	// Cache the result
+	if data, err := json.Marshal(contexts); err == nil {
+		a.Redis.Set(ctx, cacheKey, data, aiContextsCacheTTL)
+	}
+
+	return contexts, nil
+}
+
+// InvalidateAIContextsCache invalidates the AI contexts cache for an organization
+func (a *App) InvalidateAIContextsCache(orgID uuid.UUID) {
+	ctx := context.Background()
+	pattern := fmt.Sprintf("%s%s:*", aiContextsCachePrefix, orgID.String())
+	a.deleteKeysByPattern(ctx, pattern)
 }

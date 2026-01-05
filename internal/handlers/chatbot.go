@@ -1023,6 +1023,9 @@ func (a *App) CreateAIContext(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create AI context", nil, "")
 	}
 
+	// Invalidate cache
+	a.InvalidateAIContextsCache(orgID)
+
 	return r.SendEnvelope(map[string]interface{}{
 		"id":      ctx.ID.String(),
 		"message": "AI context created successfully",
@@ -1104,6 +1107,9 @@ func (a *App) UpdateAIContext(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update AI context", nil, "")
 	}
 
+	// Invalidate cache
+	a.InvalidateAIContextsCache(orgID)
+
 	return r.SendEnvelope(map[string]interface{}{
 		"message": "AI context updated successfully",
 	})
@@ -1129,6 +1135,9 @@ func (a *App) DeleteAIContext(r *fastglue.Request) error {
 	if result.RowsAffected == 0 {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "AI context not found", nil, "")
 	}
+
+	// Invalidate cache
+	a.InvalidateAIContextsCache(orgID)
 
 	return r.SendEnvelope(map[string]interface{}{
 		"message": "AI context deleted successfully",
