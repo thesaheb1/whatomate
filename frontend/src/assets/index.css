@@ -107,74 +107,132 @@
   background: hsl(var(--muted-foreground) / 0.5);
 }
 
-/* WhatsApp-style chat background */
+/* Chat background - plain */
 .chat-background {
-  background-color: #efeae2; /* WhatsApp beige/cream background */
-  background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23d4cfc4' fill-opacity='0.4'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+  background-color: #efeae2;
 }
 
 .dark .chat-background {
-  background-color: #0b141a; /* WhatsApp dark mode background */
-  background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%231f2c33' fill-opacity='0.5'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+  background-color: #0b141a;
 }
 
-/* WhatsApp chat bubble styles - compact */
+/* WhatsApp chat bubble styles - exact match */
 .chat-bubble {
-  @apply relative px-2.5 py-1.5 rounded-lg max-w-[75%] text-sm;
+  @apply relative px-2 py-1.5 text-sm;
+  max-width: 65%;
+  border-radius: 7.5px;
+  box-shadow: 0 1px 0.5px rgba(11, 20, 26, 0.13);
 }
 
+/* Incoming bubble - white with left tail */
 .chat-bubble-incoming {
-  @apply bg-card text-card-foreground rounded-tl-none;
+  background-color: #ffffff;
+  color: #111b21;
+  border-top-left-radius: 0;
+  margin-left: 8px;
 }
 
+.chat-bubble-incoming::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -8px;
+  width: 8px;
+  height: 13px;
+  background: #ffffff;
+  clip-path: polygon(100% 0, 100% 100%, 0 0);
+}
+
+/* Outgoing bubble - light green with right tail */
 .chat-bubble-outgoing {
-  @apply rounded-tr-none ml-auto;
-  background-color: #dcf8c6; /* WhatsApp light green */
-  color: #111b21; /* Dark text for readability */
+  background-color: #d9fdd3;
+  color: #111b21;
+  border-top-right-radius: 0;
+  margin-right: 8px;
+}
+
+.chat-bubble-outgoing::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: -8px;
+  width: 8px;
+  height: 13px;
+  background: #d9fdd3;
+  clip-path: polygon(0 0, 100% 0, 0 100%);
+}
+
+/* Dark mode bubbles */
+.dark .chat-bubble-incoming {
+  background-color: #202c33;
+  color: #e9edef;
+}
+
+.dark .chat-bubble-incoming::before {
+  background: #202c33;
 }
 
 .dark .chat-bubble-outgoing {
-  background-color: hsl(var(--primary) / 0.36);
-  color: hsl(var(--foreground));
+  background-color: #005c4b;
+  color: #e9edef;
 }
 
+.dark .chat-bubble-outgoing::before {
+  background: #005c4b;
+}
+
+/* Time and status */
 .chat-bubble-time {
-  @apply text-[11px] mt-0.5 leading-tight flex items-center gap-1;
+  @apply text-[11px] mt-1 flex items-center gap-1 float-right;
+  margin-left: 8px;
+  margin-bottom: -4px;
+  position: relative;
+  top: 4px;
 }
 
 .chat-bubble-time span {
-  @apply opacity-70;
+  color: rgba(17, 27, 33, 0.45);
 }
 
-.chat-bubble-time svg {
-  @apply opacity-100;
+.dark .chat-bubble-time span {
+  color: rgba(233, 237, 239, 0.6);
 }
 
-/* Status icons in outgoing bubbles - more visible */
-.chat-bubble-outgoing .chat-bubble-time svg {
-  color: #53bdeb; /* WhatsApp blue for read */
+/* Status icons */
+.chat-bubble-outgoing .chat-bubble-time .status-icon {
+  color: rgba(17, 27, 33, 0.45);
 }
 
-.chat-bubble-outgoing .chat-bubble-time svg.text-muted-foreground {
-  color: rgba(17, 27, 33, 0.6); /* Darker gray for sent/delivered in light mode */
+.chat-bubble-outgoing .chat-bubble-time .status-icon.text-blue-400 {
+  color: #007BFC !important;
 }
 
-.dark .chat-bubble-outgoing .chat-bubble-time svg.text-muted-foreground {
-  color: hsl(var(--muted-foreground));
+.dark .chat-bubble-outgoing .chat-bubble-time .status-icon {
+  color: rgba(233, 237, 239, 0.6);
+}
+
+.dark .chat-bubble-outgoing .chat-bubble-time .status-icon.text-blue-400 {
+  color: #007BFC !important;
 }
 
 /* Reply preview inside chat bubble */
 .reply-preview {
-  @apply border-l-2 border-primary/50;
-  background: rgba(0, 0, 0, 0.05);
+  @apply border-l-2 border-primary rounded;
+  background: rgba(17, 27, 33, 0.06);
+  margin-bottom: 4px;
 }
 
 .dark .reply-preview {
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(233, 237, 239, 0.1);
 }
 
 .chat-bubble-outgoing .reply-preview {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(17, 27, 33, 0.08);
+  border-left-color: #06cf9c;
+}
+
+.dark .chat-bubble-outgoing .reply-preview {
+  background: rgba(233, 237, 239, 0.12);
 }
 
 /* Message highlight animation for scroll-to */

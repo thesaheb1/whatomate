@@ -1211,11 +1211,9 @@ async function sendMediaMessage() {
                   </div>
                 </div>
                 <!-- Text content (for text messages or captions) -->
-                <p v-if="getMessageContent(message)" class="whitespace-pre-wrap break-words">{{ getMessageContent(message) }}</p>
+                <span v-if="getMessageContent(message)" class="whitespace-pre-wrap break-words">{{ getMessageContent(message) }}<span class="chat-bubble-time"><span>{{ formatMessageTime(message.created_at) }}</span><component v-if="message.direction === 'outgoing'" :is="getMessageStatusIcon(message.status)" :class="['h-4 w-4 status-icon', getMessageStatusClass(message.status)]" /></span></span>
                 <!-- Fallback for media without URL -->
-                <p v-else-if="isMediaMessage(message) && !message.media_url" class="text-muted-foreground italic">
-                  [{{ message.message_type.charAt(0).toUpperCase() + message.message_type.slice(1) }}]
-                </p>
+                <span v-else-if="isMediaMessage(message) && !message.media_url" class="text-muted-foreground italic">[{{ message.message_type.charAt(0).toUpperCase() + message.message_type.slice(1) }}]<span class="chat-bubble-time"><span>{{ formatMessageTime(message.created_at) }}</span><component v-if="message.direction === 'outgoing'" :is="getMessageStatusIcon(message.status)" :class="['h-4 w-4 status-icon', getMessageStatusClass(message.status)]" /></span></span>
                 <!-- Interactive buttons -->
                 <div
                   v-if="getInteractiveButtons(message).length > 0"
@@ -1229,19 +1227,15 @@ async function sendMediaMessage() {
                     {{ btn.title }}
                   </div>
                 </div>
-                <div
-                  :class="[
-                    'chat-bubble-time flex items-center gap-1',
-                    message.direction === 'outgoing' ? 'justify-end' : 'justify-start'
-                  ]"
-                >
+                <!-- Time for messages without text content -->
+                <span v-if="!getMessageContent(message) && !(isMediaMessage(message) && !message.media_url)" class="chat-bubble-time block clear-both">
                   <span>{{ formatMessageTime(message.created_at) }}</span>
                   <component
                     v-if="message.direction === 'outgoing'"
                     :is="getMessageStatusIcon(message.status)"
-                    :class="['h-4 w-4', getMessageStatusClass(message.status)]"
+                    :class="['h-4 w-4 status-icon', getMessageStatusClass(message.status)]"
                   />
-                </div>
+                </span>
                 <!-- Reactions display -->
                 <div
                   v-if="message.reactions && message.reactions.length > 0"
