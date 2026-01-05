@@ -1113,6 +1113,9 @@ func (a *App) completeFlow(account *models.WhatsAppAccount, session *models.Chat
 		"status":          "completed",
 		"completed_at":    now,
 	})
+
+	// Clear chatbot tracking so SLA doesn't fire after flow completion
+	a.ClearContactChatbotTracking(contact.ID)
 }
 
 // sendFlowCompletionWebhook sends session data to configured webhook URL
