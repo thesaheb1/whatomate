@@ -56,9 +56,9 @@ func (p *SLAProcessor) Stop() {
 func (p *SLAProcessor) processStaleTransfers() {
 	now := time.Now()
 
-	// Get all organizations with SLA enabled
-	var settings []models.ChatbotSettings
-	if err := p.app.DB.Where("sla_enabled = ?", true).Find(&settings).Error; err != nil {
+	// Get all organizations with SLA enabled (use cache)
+	settings, err := p.app.getSLAEnabledSettingsCached()
+	if err != nil {
 		p.app.Log.Error("Failed to load SLA settings", "error", err)
 		return
 	}

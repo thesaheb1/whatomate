@@ -18,6 +18,7 @@ const (
 	keywordRulesCacheTTL    = 6 * time.Hour
 	whatsappAccountCacheTTL = 6 * time.Hour
 	webhooksCacheTTL        = 6 * time.Hour
+	slaSettingsCacheTTL     = 6 * time.Hour
 
 	// Cache key prefixes
 	settingsCachePrefix        = "chatbot:settings:"
@@ -25,6 +26,7 @@ const (
 	keywordRulesCachePrefix    = "chatbot:keywords:"
 	whatsappAccountCachePrefix = "whatsapp:account:"
 	webhooksCachePrefix        = "webhooks:"
+	slaSettingsCacheKey        = "chatbot:sla_enabled_settings"
 )
 
 // getChatbotSettingsCached retrieves chatbot settings from cache or database
@@ -258,4 +260,37 @@ func (a *App) InvalidateWebhooksCache(orgID uuid.UUID) {
 	ctx := context.Background()
 	cacheKey := fmt.Sprintf("%s%s", webhooksCachePrefix, orgID.String())
 	a.Redis.Del(ctx, cacheKey)
+}
+
+// getSLAEnabledSettingsCached retrieves all SLA-enabled chatbot settings from cache or database
+func (a *App) getSLAEnabledSettingsCached() ([]models.ChatbotSettings, error) {
+	ctx := context.Background()
+
+	// Try cache first
+	cached, err := a.Redis.Get(ctx, slaSettingsCacheKey).Result()
+	if err == nil && cached != "" {
+		var settings []models.ChatbotSettings
+		if err := json.Unmarshal([]byte(cached), &settings); err == nil {
+			return settings, nil
+		}
+	}
+
+	// Cache miss - fetch from database
+	var settings []models.ChatbotSettings
+	if err := a.DB.Where("sla_enabled = ?", true).Find(&settings).Error; err != nil {
+		return nil, err
+	}
+
+	// Cache the result
+	if data, err := json.Marshal(settings); err == nil {
+		a.Redis.Set(ctx, slaSettingsCacheKey, data, slaSettingsCacheTTL)
+	}
+
+	return settings, nil
+}
+
+// InvalidateSLASettingsCache invalidates the SLA settings cache
+func (a *App) InvalidateSLASettingsCache() {
+	ctx := context.Background()
+	a.Redis.Del(ctx, slaSettingsCacheKey)
 }

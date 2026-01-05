@@ -367,8 +367,9 @@ func (a *App) UpdateChatbotSettings(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to save settings", nil, "")
 	}
 
-	// Invalidate cache
+	// Invalidate caches
 	a.InvalidateChatbotSettingsCache(orgID)
+	a.InvalidateSLASettingsCache() // SLA settings are part of chatbot settings
 
 	return r.SendEnvelope(map[string]interface{}{
 		"message": "Settings updated successfully",
