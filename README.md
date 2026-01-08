@@ -276,19 +276,42 @@ The worker service handles bulk campaign message processing using Redis Streams 
 # Run with 3 embedded workers
 ./whatomate -workers=3
 
-# Disable embedded workers
+# Disable embedded workers (use standalone workers only)
 ./whatomate -workers=0
 ```
 
 **Standalone Mode**: Run workers as separate processes.
 
 ```bash
-# Run standalone worker
+# Run standalone worker (1 worker)
 go run cmd/worker/main.go
+
+# Run with multiple workers
+go run cmd/worker/main.go -workers=5
 
 # Or with Docker Compose
 docker compose up -d --scale worker=3
 ```
+
+### Scaling Workers Without Restart
+
+Workers can be added dynamically without restarting the server. Since all workers consume from the same Redis Stream consumer group, new workers immediately start processing queued jobs.
+
+```bash
+# Server running with 1 embedded worker
+go run cmd/server/main.go -workers=1
+
+# In another terminal, add 5 more workers
+go run cmd/worker/main.go -workers=5
+
+# Add even more workers if needed
+go run cmd/worker/main.go -workers=10
+```
+
+This is useful for:
+- **Burst processing**: Scale up workers during high-volume campaigns
+- **Zero-downtime scaling**: Add capacity without interrupting the server
+- **Resource optimization**: Run workers on different machines
 
 ## API Endpoints
 
