@@ -32,8 +32,11 @@ test.describe('Agent Analytics', () => {
   })
 
   test('should display agent performance metrics', async ({ page }) => {
-    // Wait for stats cards to load
-    await expect(page.getByText('Transfers Handled')).toBeVisible({ timeout: 10000 })
+    // Wait for loading to complete (skeleton should disappear)
+    await page.waitForSelector('.card-depth', { timeout: 15000 })
+
+    // Check stat card labels are visible
+    await expect(page.getByText('Transfers Handled')).toBeVisible()
     await expect(page.getByText('Active Conversations')).toBeVisible()
   })
 })
