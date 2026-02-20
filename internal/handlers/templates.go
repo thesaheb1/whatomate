@@ -406,6 +406,9 @@ func (a *App) SyncTemplates(r *fastglue.Request) error {
 				template.HeaderType = comp.Format
 				if comp.Text != "" {
 					template.HeaderContent = comp.Text
+				} else if comp.Example != nil && len(comp.Example.HeaderHandle) > 0 {
+					// Media headers (DOCUMENT, IMAGE, VIDEO) store handle in example
+					template.HeaderContent = comp.Example.HeaderHandle[0]
 				}
 			case "BODY":
 				template.BodyContent = comp.Text
