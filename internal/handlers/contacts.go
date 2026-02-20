@@ -476,8 +476,7 @@ func (a *App) markMessagesAsRead(orgID uuid.UUID, contactID uuid.UUID, contact *
 	a.DB.Model(contact).Update("is_read", true)
 
 	if len(unreadMessages) > 0 && contact.WhatsAppAccount != "" {
-		var account models.WhatsAppAccount
-		if err := a.DB.Where("organization_id = ? AND name = ?", orgID, contact.WhatsAppAccount).First(&account).Error; err == nil {
+		if account, err := a.resolveWhatsAppAccount(orgID, contact.WhatsAppAccount); err == nil {
 			if account.AutoReadReceipt {
 				a.wg.Add(1)
 				go func() {
@@ -486,7 +485,7 @@ func (a *App) markMessagesAsRead(orgID uuid.UUID, contactID uuid.UUID, contact *
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer cancel()
 
-					waAccount := a.toWhatsAppAccount(&account)
+					waAccount := a.toWhatsAppAccount(account)
 					for _, msg := range unreadMessages {
 						// Check if context was cancelled
 						if ctx.Err() != nil {
@@ -658,6 +657,7 @@ func (a *App) resolveWhatsAppAccount(orgID uuid.UUID, accountName string) (*mode
 		if err := a.DB.Where("name = ? AND organization_id = ?", accountName, orgID).First(&account).Error; err != nil {
 			return nil, fmt.Errorf("WhatsApp account not found")
 		}
+		a.decryptAccountSecrets(&account)
 		return &account, nil
 	}
 
@@ -668,7 +668,18 @@ func (a *App) resolveWhatsAppAccount(orgID uuid.UUID, accountName string) (*mode
 			return nil, fmt.Errorf("no WhatsApp account configured")
 		}
 	}
+	a.decryptAccountSecrets(&account)
 	return &account, nil
+}
+
+// resolveWhatsAppAccountByID fetches a WhatsApp account by UUID and org, decrypts secrets.
+func (a *App) resolveWhatsAppAccountByID(r *fastglue.Request, id, orgID uuid.UUID) (*models.WhatsAppAccount, error) {
+	account, err := findByIDAndOrg[models.WhatsAppAccount](a.DB, r, id, orgID, "Account")
+	if err != nil {
+		return nil, err
+	}
+	a.decryptAccountSecrets(account)
+	return account, nil
 }
 
 func truncateString(s string, maxLen int) string {

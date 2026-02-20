@@ -609,27 +609,18 @@ func (a *App) SendTemplateMessage(r *fastglue.Request) error {
 		contact = &c
 	}
 
-	// Get WhatsApp account
-	var account models.WhatsAppAccount
-	if req.AccountName != "" {
-		if err := a.DB.Where("name = ? AND organization_id = ?", req.AccountName, orgID).First(&account).Error; err != nil {
-			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "WhatsApp account not found", nil, "")
-		}
-	} else if template.WhatsAppAccount != "" {
-		if err := a.DB.Where("name = ? AND organization_id = ?", template.WhatsAppAccount, orgID).First(&account).Error; err != nil {
-			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Template's WhatsApp account not found", nil, "")
-		}
-	} else if contact != nil && contact.WhatsAppAccount != "" {
-		if err := a.DB.Where("name = ? AND organization_id = ?", contact.WhatsAppAccount, orgID).First(&account).Error; err != nil {
-			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Contact's WhatsApp account not found", nil, "")
-		}
-	} else {
-		// Get default outgoing account
-		if err := a.DB.Where("organization_id = ? AND is_default_outgoing = ?", orgID, true).First(&account).Error; err != nil {
-			if err := a.DB.Where("organization_id = ?", orgID).First(&account).Error; err != nil {
-				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "No WhatsApp account configured", nil, "")
-			}
-		}
+	// Determine which WhatsApp account to use (explicit > template > contact > default)
+	accountName := req.AccountName
+	if accountName == "" {
+		accountName = template.WhatsAppAccount
+	}
+	if accountName == "" && contact != nil {
+		accountName = contact.WhatsAppAccount
+	}
+
+	account, err := a.resolveWhatsAppAccount(orgID, accountName)
+	if err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, err.Error(), nil, "")
 	}
 
 	// Extract parameter names and resolve values
@@ -653,7 +644,7 @@ func (a *App) SendTemplateMessage(r *fastglue.Request) error {
 
 	// Send using unified message sender
 	msgReq := OutgoingMessageRequest{
-		Account:    &account,
+		Account:    account,
 		Contact:    contact,
 		Type:       models.MessageTypeTemplate,
 		Template:   &template,
