@@ -184,6 +184,13 @@ export const useCallingStore = defineStore('calling', () => {
       audio.play().catch(() => { /* ignore autoplay */ })
     }
 
+    // Clean up when WebRTC connection drops
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        cleanup()
+      }
+    }
+
     // Create SDP offer
     const offer = await pc.createOffer()
     await pc.setLocalDescription(offer)
@@ -260,6 +267,13 @@ export const useCallingStore = defineStore('calling', () => {
       const audio = new Audio()
       audio.srcObject = event.streams[0]
       audio.play().catch(() => { /* ignore autoplay */ })
+    }
+
+    // Clean up when WebRTC connection drops
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        cleanup()
+      }
     }
 
     // Create SDP offer
@@ -371,7 +385,10 @@ export const useCallingStore = defineStore('calling', () => {
   function handleCallEvent(type: string, payload: any) {
     switch (type) {
       case 'call_transfer_waiting':
-        waitingTransfers.value.push(payload as CallTransfer)
+        // Deduplicate: only add if this transfer ID isn't already in the list
+        if (!waitingTransfers.value.some(t => t.id === payload.id)) {
+          waitingTransfers.value.push(payload as CallTransfer)
+        }
         break
       case 'call_transfer_connected':
         // Another agent accepted this transfer — remove from our waiting list
@@ -384,6 +401,13 @@ export const useCallingStore = defineStore('calling', () => {
         if (activeTransfer.value?.id === payload.id) {
           cleanup()
         }
+        break
+      case 'call_ended':
+        // If the agent is on a call that just ended, clean up
+        if (isOnCall.value) {
+          cleanup()
+        }
+        fetchCallLogs()
         break
       // Outgoing call events
       case 'outgoing_call_ringing':
