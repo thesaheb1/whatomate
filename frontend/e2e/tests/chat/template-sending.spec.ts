@@ -45,13 +45,14 @@ test.describe('Template Sending', () => {
     const api = new ApiHelper(reqContext)
     await api.loginAsAdmin()
 
-    // Ensure we have at least one contact
-    let contacts = await api.getContacts()
-    if (contacts.length === 0) {
-      await api.createContact(`91${Date.now().toString().slice(-10)}`, 'Template Test Contact')
-      contacts = await api.getContacts()
-    }
-    contactId = contacts[0].id
+    // Always create a fresh contact for template tests so it has no
+    // message history from other accounts (which would override selectedAccount).
+    const tplPhone = `91${Date.now().toString().slice(-10)}`
+    await api.createContact(tplPhone, 'Template Test Contact')
+    const contacts = await api.getContacts()
+    // Find the contact we just created (most recent by phone)
+    const tplContact = contacts.find((c: any) => c.phone_number === tplPhone) || contacts[0]
+    contactId = tplContact.id
 
     // Ensure we have a WhatsApp account (required for templates)
     let accounts: any[] = []
