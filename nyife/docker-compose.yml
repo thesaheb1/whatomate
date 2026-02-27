@@ -1,0 +1,892 @@
+version: '3.9'
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NYIFE — Full Docker Compose Orchestration
+# All services + infrastructure (MySQL, Redis, Kafka, Zookeeper)
+#
+# Usage:
+#   docker-compose up -d               # Start everything
+#   docker-compose up -d mysql redis   # Start infrastructure only
+#   docker-compose logs -f api-gateway # Stream service logs
+#   docker-compose down -v             # Stop and remove volumes
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Shared anchor for common service configuration ───────────────────────────
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  networks:
+    - nyife-network
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    kafka:
+      condition: service_healthy
+  env_file:
+    - .env
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # INFRASTRUCTURE
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ── MySQL 8.0 ─────────────────────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: nyife-mysql
+    restart: unless-stopped
+    networks:
+      - nyife-network
+    ports:
+      - "127.0.0.1:3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_CHARACTER_SET_SERVER: utf8mb4
+      MYSQL_COLLATION_SERVER: utf8mb4_unicode_ci
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+      --innodb-buffer-pool-size=256M
+      --max-connections=500
+      --slow-query-log=1
+      --slow-query-log-file=/var/log/mysql/slow.log
+      --long-query-time=2
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./scripts/mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ── Redis 7 ───────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: nyife-redis
+    restart: unless-stopped
+    networks:
+      - nyife-network
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --appendonly yes
+      --loglevel notice
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Zookeeper (required by Kafka) ─────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: nyife-zookeeper
+    restart: unless-stopped
+    networks:
+      - nyife-network
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_INIT_LIMIT: 5
+      ZOOKEEPER_SYNC_LIMIT: 2
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── Kafka ──────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: nyife-kafka
+    restart: unless-stopped
+    networks:
+      - nyife-network
+    ports:
+      - "127.0.0.1:9092:9092"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_RETENTION_HOURS: 168         # 7 days
+      KAFKA_LOG_RETENTION_BYTES: 1073741824  # 1GB per partition
+      KAFKA_LOG_SEGMENT_BYTES: 104857600     # 100MB
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MESSAGE_MAX_BYTES: 10485760      # 10MB
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Kafka Topic Initializer (creates all topics on startup) ───────────────
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: nyife-kafka-init
+    networks:
+      - nyife-network
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Creating Kafka topics..."
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic campaign.messages.send         --partitions 6 --replication-factor 1 --config retention.ms=604800000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic campaign.message.status        --partitions 3 --replication-factor 1 --config retention.ms=604800000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic notification.dispatch          --partitions 3 --replication-factor 1 --config retention.ms=86400000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic email.dispatch                 --partitions 3 --replication-factor 1 --config retention.ms=86400000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic whatsapp.webhook.inbound       --partitions 6 --replication-factor 1 --config retention.ms=259200000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic whatsapp.webhook.status        --partitions 6 --replication-factor 1 --config retention.ms=259200000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic template.status.sync           --partitions 2 --replication-factor 1 --config retention.ms=604800000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic wallet.transaction.created     --partitions 3 --replication-factor 1 --config retention.ms=604800000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic subscription.purchased         --partitions 2 --replication-factor 1 --config retention.ms=604800000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic subscription.expired           --partitions 2 --replication-factor 1 --config retention.ms=604800000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic subscription.expiry.alert      --partitions 2 --replication-factor 1 --config retention.ms=86400000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic user.registered               --partitions 2 --replication-factor 1 --config retention.ms=604800000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic campaign.status.changed        --partitions 2 --replication-factor 1 --config retention.ms=259200000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic message.sent                   --partitions 6 --replication-factor 1 --config retention.ms=259200000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic support.ticket.created         --partitions 2 --replication-factor 1 --config retention.ms=86400000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic support.ticket.replied         --partitions 2 --replication-factor 1 --config retention.ms=86400000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic analytics.event               --partitions 3 --replication-factor 1 --config retention.ms=604800000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic admin.broadcast               --partitions 2 --replication-factor 1 --config retention.ms=86400000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic dlq.message-service           --partitions 1 --replication-factor 1 --config retention.ms=2592000000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic dlq.campaign-service          --partitions 1 --replication-factor 1 --config retention.ms=2592000000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic dlq.notification-service      --partitions 1 --replication-factor 1 --config retention.ms=2592000000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic dlq.analytics-service         --partitions 1 --replication-factor 1 --config retention.ms=2592000000
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic dlq.automation-service        --partitions 1 --replication-factor 1 --config retention.ms=2592000000
+        echo "All Kafka topics created successfully."
+    restart: on-failure
+
+  # ── Kafka UI (development only) ───────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: nyife-kafka-ui
+    restart: unless-stopped
+    networks:
+      - nyife-network
+    ports:
+      - "127.0.0.1:8090:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: nyife-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    profiles:
+      - dev  # Only starts with: docker-compose --profile dev up
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # MICROSERVICES
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ── 1. API Gateway ────────────────────────────────────────────────────────
+  api-gateway:
+    <<: *service-defaults
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: nyife-api-gateway
+    ports:
+      - "0.0.0.0:3000:3000"
+    environment:
+      PORT: ${GATEWAY_PORT:-3000}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET}
+      CSRF_SECRET: ${CSRF_SECRET}
+      GATEWAY_CORS_ORIGINS: ${GATEWAY_CORS_ORIGINS}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
+      USER_SERVICE_URL: ${USER_SERVICE_URL}
+      ORG_SERVICE_URL: ${ORG_SERVICE_URL}
+      ADMIN_SERVICE_URL: ${ADMIN_SERVICE_URL}
+      SUBSCRIPTION_SERVICE_URL: ${SUBSCRIPTION_SERVICE_URL}
+      WALLET_SERVICE_URL: ${WALLET_SERVICE_URL}
+      PAYMENT_SERVICE_URL: ${PAYMENT_SERVICE_URL}
+      WHATSAPP_SERVICE_URL: ${WHATSAPP_SERVICE_URL}
+      CONTACT_SERVICE_URL: ${CONTACT_SERVICE_URL}
+      TEMPLATE_SERVICE_URL: ${TEMPLATE_SERVICE_URL}
+      CAMPAIGN_SERVICE_URL: ${CAMPAIGN_SERVICE_URL}
+      MESSAGE_SERVICE_URL: ${MESSAGE_SERVICE_URL}
+      CHAT_SERVICE_URL: ${CHAT_SERVICE_URL}
+      AUTOMATION_SERVICE_URL: ${AUTOMATION_SERVICE_URL}
+      NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL}
+      SUPPORT_SERVICE_URL: ${SUPPORT_SERVICE_URL}
+      ANALYTICS_SERVICE_URL: ${ANALYTICS_SERVICE_URL}
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN}
+      COOKIE_SECURE: ${COOKIE_SECURE}
+      COOKIE_SAME_SITE: ${COOKIE_SAME_SITE}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${GATEWAY_DB_NAME}
+      DB_USER: ${GATEWAY_DB_USER}
+      DB_PASS: ${GATEWAY_DB_PASS}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 2. Auth Service ──────────────────────────────────────────────────────
+  auth-service:
+    <<: *service-defaults
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    container_name: nyife-auth-service
+    environment:
+      PORT: ${AUTH_SERVICE_PORT:-3001}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${AUTH_DB_NAME}
+      DB_USER: ${AUTH_DB_USER}
+      DB_PASS: ${AUTH_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_ACCESS_EXPIRY: ${JWT_ACCESS_EXPIRY}
+      JWT_REFRESH_EXPIRY: ${JWT_REFRESH_EXPIRY}
+      CSRF_SECRET: ${CSRF_SECRET}
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN}
+      COOKIE_SECURE: ${COOKIE_SECURE}
+      BCRYPT_ROUNDS: 12
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL}
+      FACEBOOK_OAUTH_APP_ID: ${FACEBOOK_OAUTH_APP_ID}
+      FACEBOOK_OAUTH_APP_SECRET: ${FACEBOOK_OAUTH_APP_SECRET}
+      FACEBOOK_CALLBACK_URL: ${FACEBOOK_CALLBACK_URL}
+      FRONTEND_URL: ${FRONTEND_URL}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 3. User Service ──────────────────────────────────────────────────────
+  user-service:
+    <<: *service-defaults
+    build:
+      context: ./services/user-service
+      dockerfile: Dockerfile
+    container_name: nyife-user-service
+    environment:
+      PORT: ${USER_SERVICE_PORT:-3002}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${USER_DB_NAME}
+      DB_USER: ${USER_DB_USER}
+      DB_PASS: ${USER_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      UPLOAD_BASE_PATH: ${UPLOAD_BASE_PATH}
+    volumes:
+      - uploads-user:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3002/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 4. Organization Service ───────────────────────────────────────────────
+  organization-service:
+    <<: *service-defaults
+    build:
+      context: ./services/organization-service
+      dockerfile: Dockerfile
+    container_name: nyife-organization-service
+    environment:
+      PORT: ${ORG_SERVICE_PORT:-3003}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${ORG_DB_NAME}
+      DB_USER: ${ORG_DB_USER}
+      DB_PASS: ${ORG_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME}
+      FRONTEND_URL: ${FRONTEND_URL}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3003/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 5. Admin Service ─────────────────────────────────────────────────────
+  admin-service:
+    <<: *service-defaults
+    build:
+      context: ./services/admin-service
+      dockerfile: Dockerfile
+    container_name: nyife-admin-service
+    environment:
+      PORT: ${ADMIN_SERVICE_PORT:-3004}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${ADMIN_DB_NAME}
+      DB_USER: ${ADMIN_DB_USER}
+      DB_PASS: ${ADMIN_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET}
+      ADMIN_JWT_EXPIRY: ${ADMIN_JWT_EXPIRY}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      DEFAULT_SUPER_ADMIN_EMAIL: ${DEFAULT_SUPER_ADMIN_EMAIL}
+      DEFAULT_SUPER_ADMIN_PASSWORD: ${DEFAULT_SUPER_ADMIN_PASSWORD}
+      DEFAULT_SUPER_ADMIN_NAME: ${DEFAULT_SUPER_ADMIN_NAME}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME}
+      UPLOAD_BASE_PATH: ${UPLOAD_BASE_PATH}
+    volumes:
+      - uploads-admin:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3004/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 6. Subscription Service ───────────────────────────────────────────────
+  subscription-service:
+    <<: *service-defaults
+    build:
+      context: ./services/subscription-service
+      dockerfile: Dockerfile
+    container_name: nyife-subscription-service
+    environment:
+      PORT: ${SUB_SERVICE_PORT:-3005}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${SUB_DB_NAME}
+      DB_USER: ${SUB_DB_USER}
+      DB_PASS: ${SUB_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3005/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 7. Wallet Service ─────────────────────────────────────────────────────
+  wallet-service:
+    <<: *service-defaults
+    build:
+      context: ./services/wallet-service
+      dockerfile: Dockerfile
+    container_name: nyife-wallet-service
+    environment:
+      PORT: ${WALLET_SERVICE_PORT:-3006}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${WALLET_DB_NAME}
+      DB_USER: ${WALLET_DB_USER}
+      DB_PASS: ${WALLET_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      SUBSCRIPTION_SERVICE_URL: ${SUBSCRIPTION_SERVICE_URL}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3006/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 8. Payment Service ────────────────────────────────────────────────────
+  payment-service:
+    <<: *service-defaults
+    build:
+      context: ./services/payment-service
+      dockerfile: Dockerfile
+    container_name: nyife-payment-service
+    environment:
+      PORT: ${PAYMENT_SERVICE_PORT:-3007}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${PAYMENT_DB_NAME}
+      DB_USER: ${PAYMENT_DB_USER}
+      DB_PASS: ${PAYMENT_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      TAX_ENABLED: ${TAX_ENABLED}
+      TAX_PERCENTAGE: ${TAX_PERCENTAGE}
+      TAX_INCLUSIVE: ${TAX_INCLUSIVE}
+      TAX_APPLY_SUBSCRIPTION: ${TAX_APPLY_SUBSCRIPTION}
+      TAX_APPLY_WALLET: ${TAX_APPLY_WALLET}
+      SUBSCRIPTION_SERVICE_URL: ${SUBSCRIPTION_SERVICE_URL}
+      WALLET_SERVICE_URL: ${WALLET_SERVICE_URL}
+      FRONTEND_URL: ${FRONTEND_URL}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3007/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 9. WhatsApp Service ───────────────────────────────────────────────────
+  whatsapp-service:
+    <<: *service-defaults
+    build:
+      context: ./services/whatsapp-service
+      dockerfile: Dockerfile
+    container_name: nyife-whatsapp-service
+    environment:
+      PORT: ${WA_SERVICE_PORT:-3008}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${WA_DB_NAME}
+      DB_USER: ${WA_DB_USER}
+      DB_PASS: ${WA_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      META_BASE_URL: ${META_BASE_URL}
+      META_DEFAULT_API_VERSION: ${META_DEFAULT_API_VERSION}
+      META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN}
+      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET}
+      WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL}
+      SUBSCRIPTION_SERVICE_URL: ${SUBSCRIPTION_SERVICE_URL}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3008/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 10. Contact Service ───────────────────────────────────────────────────
+  contact-service:
+    <<: *service-defaults
+    build:
+      context: ./services/contact-service
+      dockerfile: Dockerfile
+    container_name: nyife-contact-service
+    environment:
+      PORT: ${CONTACT_SERVICE_PORT:-3009}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${CONTACT_DB_NAME}
+      DB_USER: ${CONTACT_DB_USER}
+      DB_PASS: ${CONTACT_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      SUBSCRIPTION_SERVICE_URL: ${SUBSCRIPTION_SERVICE_URL}
+      UPLOAD_BASE_PATH: ${UPLOAD_BASE_PATH}
+    volumes:
+      - uploads-contacts:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3009/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 11. Template Service ──────────────────────────────────────────────────
+  template-service:
+    <<: *service-defaults
+    build:
+      context: ./services/template-service
+      dockerfile: Dockerfile
+    container_name: nyife-template-service
+    environment:
+      PORT: ${TEMPLATE_SERVICE_PORT:-3010}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${TEMPLATE_DB_NAME}
+      DB_USER: ${TEMPLATE_DB_USER}
+      DB_PASS: ${TEMPLATE_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      META_BASE_URL: ${META_BASE_URL}
+      META_DEFAULT_API_VERSION: ${META_DEFAULT_API_VERSION}
+      WHATSAPP_SERVICE_URL: ${WHATSAPP_SERVICE_URL}
+      SUBSCRIPTION_SERVICE_URL: ${SUBSCRIPTION_SERVICE_URL}
+      UPLOAD_BASE_PATH: ${UPLOAD_BASE_PATH}
+    volumes:
+      - uploads-templates:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3010/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 12. Campaign Service ──────────────────────────────────────────────────
+  campaign-service:
+    <<: *service-defaults
+    build:
+      context: ./services/campaign-service
+      dockerfile: Dockerfile
+    container_name: nyife-campaign-service
+    environment:
+      PORT: ${CAMPAIGN_SERVICE_PORT:-3011}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${CAMPAIGN_DB_NAME}
+      DB_USER: ${CAMPAIGN_DB_USER}
+      DB_PASS: ${CAMPAIGN_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      SUBSCRIPTION_SERVICE_URL: ${SUBSCRIPTION_SERVICE_URL}
+      WALLET_SERVICE_URL: ${WALLET_SERVICE_URL}
+      TEMPLATE_SERVICE_URL: ${TEMPLATE_SERVICE_URL}
+      WHATSAPP_SERVICE_URL: ${WHATSAPP_SERVICE_URL}
+      CONTACT_SERVICE_URL: ${CONTACT_SERVICE_URL}
+      UPLOAD_BASE_PATH: ${UPLOAD_BASE_PATH}
+    volumes:
+      - uploads-campaigns:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3011/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 13. Message Service ───────────────────────────────────────────────────
+  message-service:
+    <<: *service-defaults
+    build:
+      context: ./services/message-service
+      dockerfile: Dockerfile
+    container_name: nyife-message-service
+    environment:
+      PORT: ${MESSAGE_SERVICE_PORT:-3012}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${MESSAGE_DB_NAME}
+      DB_USER: ${MESSAGE_DB_USER}
+      DB_PASS: ${MESSAGE_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      META_BASE_URL: ${META_BASE_URL}
+      META_DEFAULT_API_VERSION: ${META_DEFAULT_API_VERSION}
+      WHATSAPP_SERVICE_URL: ${WHATSAPP_SERVICE_URL}
+      WALLET_SERVICE_URL: ${WALLET_SERVICE_URL}
+      CONTACT_SERVICE_URL: ${CONTACT_SERVICE_URL}
+      SUBSCRIPTION_SERVICE_URL: ${SUBSCRIPTION_SERVICE_URL}
+      UPLOAD_BASE_PATH: ${UPLOAD_BASE_PATH}
+    volumes:
+      - uploads-messages:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3012/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 14. Chat Service ──────────────────────────────────────────────────────
+  chat-service:
+    <<: *service-defaults
+    build:
+      context: ./services/chat-service
+      dockerfile: Dockerfile
+    container_name: nyife-chat-service
+    environment:
+      PORT: ${CHAT_SERVICE_PORT:-3013}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${CHAT_DB_NAME}
+      DB_USER: ${CHAT_DB_USER}
+      DB_PASS: ${CHAT_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      CONTACT_SERVICE_URL: ${CONTACT_SERVICE_URL}
+      MESSAGE_SERVICE_URL: ${MESSAGE_SERVICE_URL}
+      ORG_SERVICE_URL: ${ORG_SERVICE_URL}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3013/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 15. Automation Service ────────────────────────────────────────────────
+  automation-service:
+    <<: *service-defaults
+    build:
+      context: ./services/automation-service
+      dockerfile: Dockerfile
+    container_name: nyife-automation-service
+    environment:
+      PORT: ${AUTOMATION_SERVICE_PORT:-3014}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${AUTOMATION_DB_NAME}
+      DB_USER: ${AUTOMATION_DB_USER}
+      DB_PASS: ${AUTOMATION_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      MESSAGE_SERVICE_URL: ${MESSAGE_SERVICE_URL}
+      CONTACT_SERVICE_URL: ${CONTACT_SERVICE_URL}
+      CHAT_SERVICE_URL: ${CHAT_SERVICE_URL}
+      WHATSAPP_SERVICE_URL: ${WHATSAPP_SERVICE_URL}
+      TEMPLATE_SERVICE_URL: ${TEMPLATE_SERVICE_URL}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3014/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 16. Notification Service ──────────────────────────────────────────────
+  notification-service:
+    <<: *service-defaults
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+    container_name: nyife-notification-service
+    environment:
+      PORT: ${NOTIF_SERVICE_PORT:-3015}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${NOTIF_DB_NAME}
+      DB_USER: ${NOTIF_DB_USER}
+      DB_PASS: ${NOTIF_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_SECURE: ${SMTP_SECURE}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL}
+      ADMIN_SERVICE_URL: ${ADMIN_SERVICE_URL}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3015/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 17. Support Service ───────────────────────────────────────────────────
+  support-service:
+    <<: *service-defaults
+    build:
+      context: ./services/support-service
+      dockerfile: Dockerfile
+    container_name: nyife-support-service
+    environment:
+      PORT: ${SUPPORT_SERVICE_PORT:-3016}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${SUPPORT_DB_NAME}
+      DB_USER: ${SUPPORT_DB_USER}
+      DB_PASS: ${SUPPORT_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      UPLOAD_BASE_PATH: ${UPLOAD_BASE_PATH}
+    volumes:
+      - uploads-support:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3016/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 18. Analytics Service ─────────────────────────────────────────────────
+  analytics-service:
+    <<: *service-defaults
+    build:
+      context: ./services/analytics-service
+      dockerfile: Dockerfile
+    container_name: nyife-analytics-service
+    environment:
+      PORT: ${ANALYTICS_SERVICE_PORT:-3017}
+      NODE_ENV: ${NODE_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      DB_NAME: ${ANALYTICS_DB_NAME}
+      DB_USER: ${ANALYTICS_DB_USER}
+      DB_PASS: ${ANALYTICS_DB_PASS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3017/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NETWORKS
+# ═══════════════════════════════════════════════════════════════════════════════
+networks:
+  nyife-network:
+    driver: bridge
+    name: nyife-network
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VOLUMES
+# ═══════════════════════════════════════════════════════════════════════════════
+volumes:
+  mysql-data:
+    name: nyife-mysql-data
+  redis-data:
+    name: nyife-redis-data
+  kafka-data:
+    name: nyife-kafka-data
+  zookeeper-data:
+    name: nyife-zookeeper-data
+  zookeeper-logs:
+    name: nyife-zookeeper-logs
+  uploads-user:
+    name: nyife-uploads-user
+  uploads-admin:
+    name: nyife-uploads-admin
+  uploads-contacts:
+    name: nyife-uploads-contacts
+  uploads-templates:
+    name: nyife-uploads-templates
+  uploads-campaigns:
+    name: nyife-uploads-campaigns
+  uploads-messages:
+    name: nyife-uploads-messages
+  uploads-support:
+    name: nyife-uploads-support
