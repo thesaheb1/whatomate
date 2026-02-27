@@ -1,11 +1,13 @@
-# Whatomate Configuration
+# nyife Configuration
 # Copy this to config.toml and update values
 #
 # For Docker: use "db" and "redis" as hostnames
 # For local dev: use "localhost"
+# Environment variables override file config with NYIFE_ prefix
+# e.g., NYIFE_DATABASE_HOST, NYIFE_JWT_SECRET
 
 [app]
-name = "Whatomate"
+name = "nyife"
 environment = "development"  # development, staging, production
 debug = true
 
@@ -19,9 +21,9 @@ base_path = ""  # Set to "/subpath" if behind nginx proxy pass
 [database]
 host = "db"  # Use "localhost" for local development
 port = 5432
-user = "whatomate"
-password = "whatomate"
-name = "whatomate"
+user = "nyife"
+password = "nyife"
+name = "nyife"
 ssl_mode = "disable"
 max_open_conns = 25
 max_idle_conns = 5

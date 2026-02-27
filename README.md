@@ -1,60 +1,81 @@
-<a href="https://zerodha.tech"><img src="https://zerodha.tech/static/images/github-badge.svg" align="right" alt="Zerodha Tech Badge" /></a>
+# nyife
 
-# Whatomate
+Enterprise WhatsApp Marketing SaaS Platform. Multi-tenant, subscription-based, built for scale.
 
-Modern, open-source WhatsApp Business Platform. Single binary app.
+## Overview
 
-![Dashboard](docs/public/images/01-dashboard.png)
+**nyife** is an enterprise-grade WhatsApp marketing and engagement platform built for businesses that need scale, reliability, and developer-grade control. It provides a complete multi-tenant SaaS solution for managing WhatsApp Business campaigns, automation, and real-time customer engagement.
 
-## Features
+## Key Features
 
-- **Multi-tenant Architecture**
-  Support multiple organizations with isolated data and configurations.
+### Multi-Tenant Architecture
+- Isolated organization workspaces with independent data, settings, and billing
+- Platform-level admin panel for tenant lifecycle management
+- Subdomain or path-based tenant routing
 
-- **Role-Based Access Control**
-  Three roles (Admin, Manager, Agent) with granular permissions.
+### Subscription & Billing
+- Monthly, yearly, and lifetime subscription plans
+- Wallet system with per-message billing and top-up support
+- Usage dashboards with cost breakdowns per tenant
 
-- **WhatsApp Cloud API Integration**
-  Connect with Meta's WhatsApp Business API for messaging.
+### Role-Based Access Control
+- Four roles: **Super Admin**, **Admin**, **Manager**, **Agent**
+- Granular permission scoping per workspace
+- SSO support (Google, Microsoft, GitHub, Facebook, custom OIDC)
 
-- **Real-time Chat**
-  Live messaging with WebSocket support for instant communication.
+### WhatsApp Cloud API Integration
+- Native Meta WhatsApp Business Cloud API integration
+- Multi-account support per organization
+- Template management with Meta approval flow
 
-- **Template Management**
-  Create and manage message templates approved by Meta.
+### Real-Time Messaging
+- WebSocket-powered live inbox with full message history
+- Incoming/outgoing messages, media, interactive buttons, reactions
+- Agent availability and transfer queue management
 
-- **Bulk Campaigns**
-  Send campaigns to multiple contacts with retry support for failed messages.
+### Campaign Engine
+- Bulk campaigns with Redis-backed queue for high-throughput sending
+- Retry logic for failed messages, pause/resume/cancel controls
+- Per-campaign analytics and recipient import via CSV
 
-- **Chatbot Automation**
-  Keyword-based auto-replies, conversation flows with branching logic, and AI-powered responses (OpenAI, Anthropic, Google).
+### Automation Engine
+- Keyword-triggered auto-replies
+- Visual conversation flow builder with branching logic
+- AI-powered responses (OpenAI, Anthropic, Google)
+- Custom webhook actions with one-time token redirects
 
-- **Canned Responses**
-  Pre-defined quick replies with slash commands (`/shortcut`) and dynamic placeholders.
+### Developer API
+- Token-based API key authentication
+- Full REST API with webhook support for all platform events
+- Custom action endpoints with dynamic redirects
 
-- **Analytics Dashboard**
-  Track messages, engagement, and campaign performance.
+### Analytics & Reporting
+- Platform-wide analytics dashboard (messages, contacts, campaigns)
+- Per-agent performance analytics with SLA tracking
+- Campaign performance breakdowns
 
-<details>
-<summary>View more screenshots</summary>
+## Architecture
 
-![Chatbot Settings](docs/public/images/02-chatbot-settings.png)
-![Conversation Flow Builder](docs/public/images/08-conversation-flow-builder.png)
-![Templates](docs/public/images/11-templates.png)
-![Campaigns](docs/public/images/13-campaigns.png)
+nyife follows a service-oriented architecture based on the proven Go + Vue.js stack:
 
-</details>
+| Layer | Technology |
+|---|---|
+| Backend | Go (Fastglue + fasthttp) |
+| Frontend | Vue.js 3, Tailwind CSS, shadcn-vue |
+| Database | PostgreSQL (GORM) |
+| Cache / Queue | Redis (streams + pub/sub) |
+| Real-time | WebSocket (hub per instance) |
+| Auth | JWT + SSO (OAuth2/OIDC) |
+| Storage | Local or S3-compatible |
 
 ## Installation
 
 ### Docker
 
-The latest image is available on Docker Hub at [`shridh0r/whatomate:latest`](https://hub.docker.com/r/shridh0r/whatomate)
-
 ```bash
 # Download compose file and sample config
-curl -LO https://raw.githubusercontent.com/shridarpatil/whatomate/main/docker/docker-compose.yml
-curl -LO https://raw.githubusercontent.com/shridarpatil/whatomate/main/config.example.toml
+curl -LO https://raw.githubusercontent.com/nyife/nyife/main/docker/docker-compose.yml
+curl -LO https://raw.githubusercontent.com/nyife/nyife/main/config.example.toml
 
 # Copy and edit config
 cp config.example.toml config.toml
@@ -65,54 +86,54 @@ docker compose up -d
 
 Go to `http://localhost:8080` and login with `admin@admin.com` / `admin`
 
-__________________
-
 ### Binary
 
-Download the [latest release](https://github.com/shridarpatil/whatomate/releases) and extract the binary.
+Download the [latest release](https://github.com/nyife/nyife/releases) and extract the binary.
 
 ```bash
-# Copy and edit config
 cp config.example.toml config.toml
-
-# Run with migrations
-./whatomate server -migrate
+./nyife server -migrate
 ```
-
-Go to `http://localhost:8080` and login with `admin@admin.com` / `admin`
-
-__________________
 
 ### Build from Source
 
 ```bash
-git clone https://github.com/shridarpatil/whatomate.git
-cd whatomate
+git clone https://github.com/nyife/nyife.git
+cd nyife
 
 # Production build (single binary with embedded frontend)
 make build-prod
-./whatomate server -migrate
+./nyife server -migrate
 ```
-
-See [configuration docs](docs/src/content/docs/getting-started/configuration.mdx) for detailed setup options.
 
 ## CLI Usage
 
 ```bash
-./whatomate server              # API + 1 worker (default)
-./whatomate server -workers=0   # API only
-./whatomate worker -workers=4   # Workers only (for scaling)
-./whatomate version             # Show version
+./nyife server              # API + 1 worker (default)
+./nyife server -workers=0   # API only
+./nyife worker -workers=4   # Workers only (for scaling)
+./nyife version             # Show version
 ```
 
-## Developers
+## Configuration
 
-The backend is written in Go ([Fastglue](https://github.com/zerodha/fastglue)) and the frontend is Vue.js 3 with shadcn-vue.
+Environment variables use the `NYIFE_` prefix, e.g.:
+
+```
+NYIFE_DATABASE_HOST=db
+NYIFE_JWT_SECRET=your-secret
+```
+
+See [configuration docs](docs/src/content/docs/getting-started/configuration.mdx) for full reference.
+
+## Development
 
 ```bash
-# Development setup
-make run-migrate    # Backend (port 8080)
-cd frontend && npm run dev   # Frontend (port 3000)
+# Backend (port 8080)
+make run-migrate
+
+# Frontend (port 3000)
+cd frontend && npm run dev
 ```
 
 ## License

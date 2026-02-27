@@ -360,7 +360,7 @@ onMounted(() => {
         <DialogHeader>
           <DialogTitle>{{ isEditing ? 'Edit Webhook' : 'Add Webhook' }}</DialogTitle>
           <DialogDescription>
-            Configure a webhook to receive events from Whatomate
+            Configure a webhook to receive events from nyife
           </DialogDescription>
         </DialogHeader>
         <div class="space-y-4 py-4">

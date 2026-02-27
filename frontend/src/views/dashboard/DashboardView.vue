@@ -26,7 +26,11 @@ import {
   Clock,
   CheckCheck,
   CalendarIcon,
-  LayoutDashboard
+  LayoutDashboard,
+  Wallet,
+  Building2,
+  Megaphone,
+  Zap
 } from 'lucide-vue-next'
 import type { DateRange } from 'reka-ui'
 import { type DateValue, CalendarDate } from '@internationalized/date'
@@ -206,21 +210,21 @@ const formatDateRange = computed(() => {
 
 const statCards = [
   {
-    title: 'Total Messages',
+    title: 'Messages Sent',
     key: 'total_messages',
     changeKey: 'messages_change',
     icon: MessageSquare,
-    color: 'text-blue-500'
+    color: 'text-indigo-500'
   },
   {
-    title: 'Contacts',
+    title: 'Active Contacts',
     key: 'total_contacts',
     changeKey: 'contacts_change',
     icon: Users,
-    color: 'text-green-500'
+    color: 'text-violet-500'
   },
   {
-    title: 'Chatbot Sessions',
+    title: 'Automation Sessions',
     key: 'chatbot_sessions',
     changeKey: 'chatbot_change',
     icon: Bot,
@@ -230,8 +234,8 @@ const statCards = [
     title: 'Campaigns Sent',
     key: 'campaigns_sent',
     changeKey: 'campaigns_change',
-    icon: Send,
-    color: 'text-orange-500'
+    icon: Megaphone,
+    color: 'text-fuchsia-500'
   }
 ]
 
@@ -321,7 +325,7 @@ onMounted(() => {
         <LayoutDashboard class="h-5 w-5 mr-3" />
         <div class="flex-1">
           <h1 class="text-xl font-semibold">Dashboard</h1>
-          <p class="text-sm text-muted-foreground">Overview of your messaging platform</p>
+          <p class="text-sm text-muted-foreground">Overview of your WhatsApp marketing platform</p>
         </div>
 
         <!-- Time Range Filter -->
@@ -474,29 +478,29 @@ onMounted(() => {
                   to="/chat"
                   class="flex flex-col items-center justify-center p-4 rounded-lg border hover:bg-accent transition-colors text-foreground"
                 >
-                  <MessageSquare class="h-8 w-8 text-primary mb-2" />
-                  <span class="text-sm font-medium">Start Chat</span>
+                  <MessageSquare class="h-8 w-8 text-indigo-500 mb-2" />
+                  <span class="text-sm font-medium">Inbox</span>
                 </RouterLink>
                 <RouterLink
                   to="/campaigns"
                   class="flex flex-col items-center justify-center p-4 rounded-lg border hover:bg-accent transition-colors text-foreground"
                 >
-                  <Send class="h-8 w-8 text-orange-500 mb-2" />
+                  <Megaphone class="h-8 w-8 text-fuchsia-500 mb-2" />
                   <span class="text-sm font-medium">New Campaign</span>
                 </RouterLink>
                 <RouterLink
                   to="/templates"
                   class="flex flex-col items-center justify-center p-4 rounded-lg border hover:bg-accent transition-colors text-foreground"
                 >
-                  <span class="h-8 w-8 text-blue-500 mb-2 text-2xl">T</span>
+                  <Send class="h-8 w-8 text-violet-500 mb-2" />
                   <span class="text-sm font-medium">Templates</span>
                 </RouterLink>
                 <RouterLink
                   to="/chatbot"
                   class="flex flex-col items-center justify-center p-4 rounded-lg border hover:bg-accent transition-colors text-foreground"
                 >
-                  <Bot class="h-8 w-8 text-purple-500 mb-2" />
-                  <span class="text-sm font-medium">Chatbot</span>
+                  <Zap class="h-8 w-8 text-purple-500 mb-2" />
+                  <span class="text-sm font-medium">Automation</span>
                 </RouterLink>
               </div>
             </CardContent>

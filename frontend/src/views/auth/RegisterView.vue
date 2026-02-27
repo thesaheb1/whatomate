@@ -56,17 +56,18 @@ const handleRegister = async () => {
 </script>
 
 <template>
-  <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-green-50 to-green-100 dark:from-gray-900 dark:to-gray-800 p-4">
-    <Card class="w-full max-w-md">
-      <CardHeader class="space-y-1 text-center">
+  <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-50 to-violet-100 dark:from-gray-950 dark:to-indigo-950 p-4">
+    <Card class="w-full max-w-md shadow-lg border-0">
+      <CardHeader class="space-y-1 text-center pb-6">
         <div class="flex justify-center mb-4">
-          <div class="h-12 w-12 rounded-xl bg-primary flex items-center justify-center">
+          <div class="h-12 w-12 rounded-xl bg-primary flex items-center justify-center shadow-md">
             <MessageSquare class="h-7 w-7 text-primary-foreground" />
           </div>
         </div>
-        <CardTitle class="text-2xl font-bold">Create an account</CardTitle>
+        <div class="text-xs font-semibold tracking-widest uppercase text-primary mb-1">Enterprise WhatsApp Platform</div>
+        <CardTitle class="text-2xl font-bold">Create your workspace</CardTitle>
         <CardDescription>
-          Start your WhatsApp Business journey with Whatomate
+          Start scaling your WhatsApp marketing with nyife
         </CardDescription>
       </CardHeader>
       <form @submit.prevent="handleRegister">

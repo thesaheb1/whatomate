@@ -98,7 +98,7 @@ func generateTestRefreshToken(t *testing.T, user *models.User, secret string, ex
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(expiry)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			Issuer:    "whatomate",
+			Issuer:    "nyife",
 		},
 	}
 
@@ -475,7 +475,7 @@ func TestApp_GeneratedTokensAreValid(t *testing.T) {
 	assert.Equal(t, org.ID, accessClaims.OrganizationID)
 	assert.Equal(t, user.Email, accessClaims.Email)
 	assert.Equal(t, user.Role, accessClaims.Role)
-	assert.Equal(t, "whatomate", accessClaims.Issuer)
+	assert.Equal(t, "nyife", accessClaims.Issuer)
 
 	// Verify refresh token can be parsed
 	refreshToken, err := jwt.ParseWithClaims(resp.Data.RefreshToken, &handlers.JWTClaims{}, func(token *jwt.Token) (any, error) {

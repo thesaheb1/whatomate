@@ -32,7 +32,7 @@ type ServerConfig struct {
 	Port         int    `koanf:"port"`
 	ReadTimeout  int    `koanf:"read_timeout"`
 	WriteTimeout int    `koanf:"write_timeout"`
-	BasePath     string `koanf:"base_path"` // Base path for frontend (e.g., "/whatomate" for proxy pass)
+	BasePath     string `koanf:"base_path"` // Base path for frontend (e.g., "/nyife" for proxy pass)
 }
 
 type DatabaseConfig struct {
@@ -92,10 +92,10 @@ func Load(configPath string) (*Config, error) {
 		}
 	}
 
-	// Load from environment variables (WHATOMATE_ prefix)
-	// e.g., WHATOMATE_DATABASE_HOST -> database.host
-	if err := k.Load(env.Provider("WHATOMATE_", ".", func(s string) string {
-		return strings.ReplaceAll(strings.ToLower(strings.TrimPrefix(s, "WHATOMATE_")), "_", ".")
+	// Load from environment variables (NYIFE_ prefix)
+	// e.g., NYIFE_DATABASE_HOST -> database.host
+	if err := k.Load(env.Provider("NYIFE_", ".", func(s string) string {
+		return strings.ReplaceAll(strings.ToLower(strings.TrimPrefix(s, "NYIFE_")), "_", ".")
 	}), nil); err != nil {
 		return nil, err
 	}
@@ -113,7 +113,7 @@ func Load(configPath string) (*Config, error) {
 
 func setDefaults(cfg *Config) {
 	if cfg.App.Name == "" {
-		cfg.App.Name = "Whatomate"
+		cfg.App.Name = "nyife"
 	}
 	if cfg.App.Environment == "" {
 		cfg.App.Environment = "development"

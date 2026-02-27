@@ -12,7 +12,7 @@ import (
 
 const (
 	// CampaignStatsChannel is the Redis pub/sub channel for campaign stats updates
-	CampaignStatsChannel = "whatomate:campaign_stats"
+	CampaignStatsChannel = "nyife:campaign_stats"
 )
 
 // CampaignStatsUpdate represents a campaign stats update message

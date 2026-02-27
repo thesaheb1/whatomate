@@ -54,7 +54,7 @@ func (a *App) getOrgIDFromContext(r *fastglue.Request) (uuid.UUID, error) {
 func (a *App) HealthCheck(r *fastglue.Request) error {
 	return r.SendEnvelope(map[string]string{
 		"status":  "ok",
-		"service": "whatomate",
+		"service": "nyife",
 	})
 }
 

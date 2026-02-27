@@ -1104,7 +1104,7 @@ func (a *App) sendFlowCompletionWebhook(flow *models.ChatbotFlow, session *model
 
 	// Set default headers
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Whatomate-Webhook/1.0")
+	req.Header.Set("User-Agent", "nyife-Webhook/1.0")
 
 	// Add custom headers if configured
 	if headers, ok := config["headers"].(map[string]interface{}); ok {

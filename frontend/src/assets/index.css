@@ -5,47 +5,47 @@
 @layer base {
   :root {
     --background: 0 0% 100%;
-    --foreground: 217 19% 27%;
+    --foreground: 224 20% 20%;
     --card: 0 0% 100%;
-    --card-foreground: 217 19% 27%;
+    --card-foreground: 224 20% 20%;
     --popover: 0 0% 100%;
-    --popover-foreground: 217 19% 27%;
-    --primary: 142 70% 49%;
+    --popover-foreground: 224 20% 20%;
+    --primary: 239 84% 67%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 217 19% 27%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 217 19% 27%;
+    --secondary: 240 5% 96%;
+    --secondary-foreground: 224 20% 20%;
+    --muted: 240 5% 96%;
+    --muted-foreground: 240 4% 46%;
+    --accent: 240 5% 96%;
+    --accent-foreground: 224 20% 20%;
     --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 142 70% 49%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 6% 90%;
+    --input: 240 6% 90%;
+    --ring: 239 84% 67%;
     --radius: 0.5rem;
   }
 
   .dark {
-    --background: 0 0% 4%;
+    --background: 224 20% 6%;
     --foreground: 0 0% 95%;
-    --card: 0 0% 6%;
+    --card: 224 20% 8%;
     --card-foreground: 0 0% 95%;
-    --popover: 0 0% 6%;
+    --popover: 224 20% 8%;
     --popover-foreground: 0 0% 95%;
-    --primary: 142 70% 49%;
+    --primary: 239 84% 67%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 0 0% 12%;
+    --secondary: 224 20% 12%;
     --secondary-foreground: 0 0% 95%;
-    --muted: 0 0% 12%;
-    --muted-foreground: 0 0% 65%;
-    --accent: 0 0% 12%;
+    --muted: 224 20% 12%;
+    --muted-foreground: 240 4% 55%;
+    --accent: 224 20% 12%;
     --accent-foreground: 0 0% 95%;
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 0 0% 95%;
-    --border: 0 0% 16%;
-    --input: 0 0% 16%;
-    --ring: 142 70% 49%;
+    --border: 224 20% 16%;
+    --input: 224 20% 16%;
+    --ring: 239 84% 67%;
   }
 }
 
@@ -109,11 +109,11 @@
 
 /* Chat background - plain */
 .chat-background {
-  background-color: #efeae2;
+  background-color: #f1f2f6;
 }
 
 .dark .chat-background {
-  background-color: #0b141a;
+  background-color: #0f111a;
 }
 
 /* WhatsApp chat bubble styles - exact match */
@@ -143,10 +143,10 @@
   clip-path: polygon(100% 0, 100% 100%, 0 0);
 }
 
-/* Outgoing bubble - light green with right tail */
+/* Outgoing bubble - light indigo with right tail */
 .chat-bubble-outgoing {
-  background-color: #d9fdd3;
-  color: #111b21;
+  background-color: #e0e7ff;
+  color: #1e1b4b;
   border-top-right-radius: 0;
   margin-right: 8px;
 }
@@ -158,7 +158,7 @@
   right: -8px;
   width: 8px;
   height: 13px;
-  background: #d9fdd3;
+  background: #e0e7ff;
   clip-path: polygon(0 0, 100% 0, 0 100%);
 }
 
@@ -173,12 +173,12 @@
 }
 
 .dark .chat-bubble-outgoing {
-  background-color: #005c4b;
+  background-color: #312e81;
   color: #e9edef;
 }
 
 .dark .chat-bubble-outgoing::before {
-  background: #005c4b;
+  background: #312e81;
 }
 
 /* Time and status */
@@ -227,8 +227,8 @@
 }
 
 .chat-bubble-outgoing .reply-preview {
-  background: rgba(17, 27, 33, 0.08);
-  border-left-color: #06cf9c;
+  background: rgba(99, 102, 241, 0.1);
+  border-left-color: #6366f1;
 }
 
 .dark .chat-bubble-outgoing .reply-preview {
@@ -298,6 +298,6 @@
   --v3-picker-border: hsl(0 0% 16%);
   --v3-picker-input-bg: hsl(0 0% 12%);
   --v3-picker-input-border: hsl(0 0% 20%);
-  --v3-picker-input-focus-border: hsl(142 70% 49%);
+  --v3-picker-input-focus-border: hsl(239 84% 67%);
   --v3-picker-emoji-hover: hsl(0 0% 12%);
 }

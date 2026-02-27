@@ -41,7 +41,7 @@ func main() {
 	case "worker":
 		runWorker(os.Args[2:])
 	case "version":
-		fmt.Printf("Whatomate %s (built %s)\n", Version, BuildTime)
+		fmt.Printf("nyife %s (built %s)\n", Version, BuildTime)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -52,10 +52,10 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`Whatomate - WhatsApp Business API Platform
+	fmt.Println(`nyife - Enterprise WhatsApp Marketing SaaS Platform
 
 Usage:
-  whatomate <command> [options]
+  nyife <command> [options]
 
 Commands:
   server    Start the API server (with optional embedded workers)
@@ -73,16 +73,16 @@ Worker Options:
   -workers int      Number of workers to run (default 1)
 
 Examples:
-  whatomate server                     # API + 1 embedded worker
-  whatomate server -workers 0          # API only (no workers)
-  whatomate server -workers 4          # API + 4 embedded workers
-  whatomate server -migrate            # Run migrations and start server
-  whatomate worker -workers 4          # 4 workers only (no API)
+  nyife server                     # API + 1 embedded worker
+  nyife server -workers 0          # API only (no workers)
+  nyife server -workers 4          # API + 4 embedded workers
+  nyife server -migrate            # Run migrations and start server
+  nyife worker -workers 4          # 4 workers only (no API)
 
 Deployment Scenarios:
-  All-in-one:    whatomate server
-  Separate:      whatomate server -workers 0  (on API server)
-                 whatomate worker -workers 4  (on worker server)`)
+  All-in-one:    nyife server
+  Separate:      nyife server -workers 0  (on API server)
+                 nyife worker -workers 4  (on worker server)`)
 }
 
 // ============================================================================
@@ -102,10 +102,10 @@ func runServer(args []string) {
 		Level:           logf.DebugLevel,
 		EnableCaller:    true,
 		TimestampFormat: "2006-01-02 15:04:05",
-		DefaultFields:   []any{"app", "whatomate"},
+		DefaultFields:   []any{"app", "nyife"},
 	})
 
-	lo.Info("Starting Whatomate server...", "version", Version)
+	lo.Info("Starting nyife server...", "version", Version)
 
 	// Load configuration
 	cfg, err := config.Load(*configPath)
@@ -118,7 +118,7 @@ func runServer(args []string) {
 		lo = logf.New(logf.Opts{
 			Level:           logf.InfoLevel,
 			TimestampFormat: "2006-01-02 15:04:05",
-			DefaultFields:   []any{"app", "whatomate"},
+			DefaultFields:   []any{"app", "nyife"},
 		})
 	}
 
@@ -186,7 +186,7 @@ func runServer(args []string) {
 		Handler:      corsWrapper(g.Handler()),
 		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
 		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
-		Name:         "Whatomate",
+		Name:         "nyife",
 	}
 
 	// Start server in goroutine
@@ -283,10 +283,10 @@ func runWorker(args []string) {
 		Level:           logf.DebugLevel,
 		EnableCaller:    true,
 		TimestampFormat: "2006-01-02 15:04:05",
-		DefaultFields:   []any{"app", "whatomate-worker"},
+		DefaultFields:   []any{"app", "nyife-worker"},
 	})
 
-	lo.Info("Starting Whatomate worker...", "version", Version)
+	lo.Info("Starting nyife worker...", "version", Version)
 
 	// Load configuration
 	cfg, err := config.Load(*configPath)
@@ -299,7 +299,7 @@ func runWorker(args []string) {
 		lo = logf.New(logf.Opts{
 			Level:           logf.InfoLevel,
 			TimestampFormat: "2006-01-02 15:04:05",
-			DefaultFields:   []any{"app", "whatomate-worker"},
+			DefaultFields:   []any{"app", "nyife-worker"},
 		})
 	}
 

@@ -241,7 +241,7 @@ func (a *App) TestWebhook(r *fastglue.Request) error {
 	// Send a test event synchronously
 	testData := map[string]interface{}{
 		"test":      true,
-		"message":   "This is a test webhook from Whatomate",
+		"message":   "This is a test webhook from nyife",
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	}
 

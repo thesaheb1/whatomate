@@ -48,7 +48,11 @@ import {
   Webhook,
   BarChart3,
   ShieldCheck,
-  Zap
+  Zap,
+  CreditCard,
+  Wallet,
+  Code2,
+  Building2
 } from 'lucide-vue-next'
 import { useColorMode } from '@/composables/useColorMode'
 import { toast } from 'vue-sonner'
@@ -198,13 +202,13 @@ const allNavItems = [
     roles: ['admin', 'manager']
   },
   {
-    name: 'Chat',
+    name: 'Inbox',
     path: '/chat',
     icon: MessageSquare,
     roles: ['admin', 'manager', 'agent']
   },
   {
-    name: 'Chatbot',
+    name: 'Automation',
     path: '/chatbot',
     icon: Bot,
     roles: ['admin', 'manager'],
@@ -219,12 +223,6 @@ const allNavItems = [
     name: 'Transfers',
     path: '/chatbot/transfers',
     icon: UserX,
-    roles: ['admin', 'manager', 'agent']
-  },
-  {
-    name: 'Agent Analytics',
-    path: '/analytics/agents',
-    icon: BarChart3,
     roles: ['admin', 'manager', 'agent']
   },
   {
@@ -246,20 +244,46 @@ const allNavItems = [
     roles: ['admin', 'manager']
   },
   {
+    name: 'Analytics',
+    path: '/analytics/agents',
+    icon: BarChart3,
+    roles: ['admin', 'manager', 'agent']
+  },
+  {
+    name: 'Billing',
+    path: '/settings/billing',
+    icon: CreditCard,
+    roles: ['admin']
+  },
+  {
+    name: 'Wallet',
+    path: '/settings/wallet',
+    icon: Wallet,
+    roles: ['admin']
+  },
+  {
+    name: 'Developer',
+    path: '/settings/api-keys',
+    icon: Code2,
+    roles: ['admin'],
+    children: [
+      { name: 'API Keys', path: '/settings/api-keys', icon: Key },
+      { name: 'Webhooks', path: '/settings/webhooks', icon: Webhook },
+      { name: 'Custom Actions', path: '/settings/custom-actions', icon: Zap }
+    ]
+  },
+  {
     name: 'Settings',
     path: '/settings',
     icon: Settings,
     roles: ['admin', 'manager'],
     children: [
       { name: 'General', path: '/settings', icon: Settings },
+      { name: 'Organization', path: '/settings/accounts', icon: Building2 },
       { name: 'Chatbot', path: '/settings/chatbot', icon: Bot },
-      { name: 'Accounts', path: '/settings/accounts', icon: Users },
       { name: 'Canned Responses', path: '/settings/canned-responses', icon: MessageSquareText },
       { name: 'Teams', path: '/settings/teams', icon: Users },
       { name: 'Users', path: '/settings/users', icon: Users, roles: ['admin'] },
-      { name: 'API Keys', path: '/settings/api-keys', icon: Key, roles: ['admin'] },
-      { name: 'Webhooks', path: '/settings/webhooks', icon: Webhook, roles: ['admin'] },
-      { name: 'Custom Actions', path: '/settings/custom-actions', icon: Zap, roles: ['admin'] },
       { name: 'SSO', path: '/settings/sso', icon: ShieldCheck, roles: ['admin'] }
     ]
   }
@@ -306,14 +330,14 @@ const handleLogout = async () => {
       <!-- Logo -->
       <div class="flex h-12 items-center justify-between px-3 border-b">
         <RouterLink to="/" class="flex items-center gap-2">
-          <div class="h-7 w-7 rounded-md bg-primary flex items-center justify-center">
+          <div class="h-7 w-7 rounded-md bg-primary flex items-center justify-center shrink-0">
             <MessageSquare class="h-4 w-4 text-primary-foreground" />
           </div>
           <span
             v-if="!isCollapsed"
-            class="font-semibold text-sm text-foreground"
+            class="font-bold text-sm tracking-tight text-foreground"
           >
-            Whatomate
+            nyife
           </span>
         </RouterLink>
         <Button
