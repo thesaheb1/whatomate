@@ -2,12 +2,22 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { usersService } from '@/services/api'
 
+export interface UserRole {
+  id: string
+  name: string
+  description?: string
+  is_system: boolean
+}
+
 export interface User {
   id: string
   email: string
   full_name: string
-  role: 'admin' | 'manager' | 'agent'
+  role_id?: string
+  role?: UserRole
   is_active: boolean
+  is_super_admin?: boolean
+  is_member?: boolean
   organization_id: string
   created_at: string
   updated_at: string
@@ -17,15 +27,30 @@ export interface CreateUserData {
   email: string
   password: string
   full_name: string
-  role?: 'admin' | 'manager' | 'agent'
+  role_id?: string
+  is_super_admin?: boolean
 }
 
 export interface UpdateUserData {
   email?: string
   password?: string
   full_name?: string
-  role?: 'admin' | 'manager' | 'agent'
+  role_id?: string
   is_active?: boolean
+  is_super_admin?: boolean
+}
+
+export interface FetchUsersParams {
+  search?: string
+  page?: number
+  limit?: number
+}
+
+export interface FetchUsersResponse {
+  users: User[]
+  total: number
+  page: number
+  limit: number
 }
 
 export const useUsersStore = defineStore('users', () => {
@@ -33,12 +58,19 @@ export const useUsersStore = defineStore('users', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
 
-  async function fetchUsers(): Promise<void> {
+  async function fetchUsers(params?: FetchUsersParams): Promise<FetchUsersResponse> {
     loading.value = true
     error.value = null
     try {
-      const response = await usersService.list()
-      users.value = response.data.data.users || []
+      const response = await usersService.list(params)
+      const data = response.data.data || response.data
+      users.value = data.users || []
+      return {
+        users: data.users || [],
+        total: data.total ?? users.value.length,
+        page: data.page ?? 1,
+        limit: data.limit ?? 50
+      }
     } catch (err: any) {
       error.value = err.response?.data?.message || 'Failed to fetch users'
       throw err
@@ -96,14 +128,6 @@ export const useUsersStore = defineStore('users', () => {
     }
   }
 
-  function getUserById(id: string): User | undefined {
-    return users.value.find(u => u.id === id)
-  }
-
-  function getUsersByRole(role: 'admin' | 'manager' | 'agent'): User[] {
-    return users.value.filter(u => u.role === role)
-  }
-
   return {
     users,
     loading,
@@ -111,8 +135,6 @@ export const useUsersStore = defineStore('users', () => {
     fetchUsers,
     createUser,
     updateUser,
-    deleteUser,
-    getUserById,
-    getUsersByRole
+    deleteUser
   }
 })

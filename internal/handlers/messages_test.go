@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/shridarpatil/whatomate/internal/config"
 	"github.com/shridarpatil/whatomate/internal/handlers"
 	"github.com/shridarpatil/whatomate/internal/models"
+	"github.com/shridarpatil/whatomate/internal/templateutil"
 	"github.com/shridarpatil/whatomate/pkg/whatsapp"
 	"github.com/shridarpatil/whatomate/test/testutil"
 	"github.com/stretchr/testify/assert"
@@ -124,48 +124,17 @@ func (t *testServerTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	return http.DefaultTransport.RoundTrip(testReq)
 }
 
-// messageTestApp creates an App instance for message testing with a mock WhatsApp server.
-func messageTestApp(t *testing.T, mockServer *mockWhatsAppServer) *handlers.App {
+// newMsgTestApp creates an App instance for message testing with a mock WhatsApp server.
+func newMsgTestApp(t *testing.T, mockServer *mockWhatsAppServer) *handlers.App {
 	t.Helper()
 
-	db := testutil.SetupTestDB(t)
-	redis := testutil.SetupTestRedis(t)
 	log := testutil.NopLogger()
-
-	// Create WhatsApp client pointing to mock server
 	waClient := whatsapp.NewWithTimeout(log, 5*time.Second)
 	waClient.HTTPClient = &http.Client{
 		Transport: &testServerTransport{serverURL: mockServer.server.URL},
 	}
 
-	cfg := &config.Config{
-		JWT: config.JWTConfig{
-			Secret:            "test-secret-key-for-jwt-signing",
-			AccessExpiryMins:  15,
-			RefreshExpiryDays: 7,
-		},
-	}
-
-	return &handlers.App{
-		Config:   cfg,
-		DB:       db,
-		Redis:    redis,
-		Log:      log,
-		WhatsApp: waClient,
-	}
-}
-
-// createTestOrg creates a test organization in the database.
-func createTestOrg(t *testing.T, app *handlers.App) *models.Organization {
-	t.Helper()
-
-	org := &models.Organization{
-		BaseModel: models.BaseModel{ID: uuid.New()},
-		Name:      "Test Org " + uuid.New().String()[:8],
-		Slug:      "test-org-" + uuid.New().String()[:8],
-	}
-	require.NoError(t, app.DB.Create(org).Error)
-	return org
+	return newTestApp(t, withWhatsApp(waClient))
 }
 
 // createTestAccount creates a test WhatsApp account in the database.
@@ -187,20 +156,6 @@ func createTestAccount(t *testing.T, app *handlers.App, orgID uuid.UUID) *models
 	return account
 }
 
-// createMsgTestContact creates a test contact in the database for message tests.
-func createMsgTestContact(t *testing.T, app *handlers.App, orgID uuid.UUID, accountName string) *models.Contact {
-	t.Helper()
-
-	contact := &models.Contact{
-		BaseModel:       models.BaseModel{ID: uuid.New()},
-		OrganizationID:  orgID,
-		WhatsAppAccount: accountName,
-		PhoneNumber:     "+1234567890",
-		ProfileName:     "Test Contact",
-	}
-	require.NoError(t, app.DB.Create(contact).Error)
-	return contact
-}
 
 // --- SendOutgoingMessage Tests ---
 
@@ -208,10 +163,10 @@ func TestApp_SendOutgoingMessage_TextMessage_Success(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -241,7 +196,7 @@ func TestApp_SendOutgoingMessage_TextMessage_Success(t *testing.T) {
 	require.Len(t, mockServer.sentMessages, 1)
 	sentMsg := mockServer.sentMessages[0]
 	assert.Equal(t, "text", sentMsg["type"])
-	assert.Equal(t, "+1234567890", sentMsg["to"])
+	assert.Equal(t, contact.PhoneNumber, sentMsg["to"])
 
 	textContent := sentMsg["text"].(map[string]interface{})
 	assert.Equal(t, "Hello, World!", textContent["body"])
@@ -260,10 +215,10 @@ func TestApp_SendOutgoingMessage_TextMessage_APIError(t *testing.T) {
 	mockServer.returnError = true
 	mockServer.errorMessage = "Phone number is invalid"
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -293,10 +248,10 @@ func TestApp_SendOutgoingMessage_ImageMessage_WithMediaID(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -333,10 +288,10 @@ func TestApp_SendOutgoingMessage_ImageMessage_WithMediaData(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -373,10 +328,10 @@ func TestApp_SendOutgoingMessage_DocumentMessage(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -412,10 +367,10 @@ func TestApp_SendOutgoingMessage_VideoMessage(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -448,10 +403,10 @@ func TestApp_SendOutgoingMessage_AudioMessage(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -482,10 +437,10 @@ func TestApp_SendOutgoingMessage_InteractiveButtons(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -532,10 +487,10 @@ func TestApp_SendOutgoingMessage_InteractiveCTAURL(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -574,10 +529,10 @@ func TestApp_SendOutgoingMessage_TemplateMessage(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	// Create a test template
 	template := &models.Template{
@@ -601,7 +556,7 @@ func TestApp_SendOutgoingMessage_TemplateMessage(t *testing.T) {
 		Contact:    contact,
 		Type:       models.MessageTypeTemplate,
 		Template:   template,
-		BodyParams: []string{"John", "ORD-123"},
+		BodyParams: map[string]string{"1": "John", "2": "ORD-123"},
 	}
 
 	opts := handlers.ChatbotSendOptions()
@@ -611,9 +566,9 @@ func TestApp_SendOutgoingMessage_TemplateMessage(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, msg)
 
-	// Verify template message was saved
+	// Verify template message was saved with rendered content
 	assert.Equal(t, models.MessageTypeTemplate, msg.MessageType)
-	assert.Contains(t, msg.Content, "Hello World Template")
+	assert.Equal(t, "Hello John! Your order ORD-123 is ready.", msg.Content)
 
 	// Verify template metadata
 	assert.NotNil(t, msg.Metadata)
@@ -633,10 +588,10 @@ func TestApp_SendOutgoingMessage_TemplateMessage_MissingTemplate(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -645,7 +600,7 @@ func TestApp_SendOutgoingMessage_TemplateMessage_MissingTemplate(t *testing.T) {
 		Contact:    contact,
 		Type:       models.MessageTypeTemplate,
 		Template:   nil, // Missing template
-		BodyParams: []string{"param1"},
+		BodyParams: map[string]string{"1": "param1"},
 	}
 
 	opts := handlers.ChatbotSendOptions()
@@ -667,10 +622,10 @@ func TestApp_SendOutgoingMessage_AsyncOption(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -704,10 +659,10 @@ func TestApp_SendOutgoingMessage_SyncOption(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -737,10 +692,10 @@ func TestApp_SendOutgoingMessage_WithSentByUser(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	// Create a test user (required due to foreign key constraint)
 	user := &models.User{
@@ -748,7 +703,6 @@ func TestApp_SendOutgoingMessage_WithSentByUser(t *testing.T) {
 		OrganizationID: org.ID,
 		Email:          "agent-" + uuid.New().String()[:8] + "@test.com",
 		FullName:       "Test Agent",
-		Role:           models.RoleAgent,
 		IsActive:       true,
 	}
 	require.NoError(t, app.DB.Create(user).Error)
@@ -785,10 +739,10 @@ func TestApp_SendOutgoingMessage_UnsupportedType(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -861,10 +815,10 @@ func TestApp_SendOutgoingMessage_ContactLastMessageUpdated(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -891,10 +845,10 @@ func TestApp_SendOutgoingMessage_MediaPreview(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -921,10 +875,10 @@ func TestApp_SendOutgoingMessage_DocumentPreview(t *testing.T) {
 	mockServer := newMockWhatsAppServer()
 	defer mockServer.close()
 
-	app := messageTestApp(t, mockServer)
-	org := createTestOrg(t, app)
+	app := newMsgTestApp(t, mockServer)
+	org := testutil.CreateTestOrganization(t, app.DB)
 	account := createTestAccount(t, app, org.ID)
-	contact := createMsgTestContact(t, app, org.ID, account.Name)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
 
 	ctx := testutil.TestContext(t)
 
@@ -944,4 +898,139 @@ func TestApp_SendOutgoingMessage_DocumentPreview(t *testing.T) {
 	var updatedContact models.Contact
 	require.NoError(t, app.DB.First(&updatedContact, contact.ID).Error)
 	assert.Equal(t, "[Document: report.pdf]", updatedContact.LastMessagePreview)
+}
+
+// --- Template Parameter Tests ---
+
+func TestExtractParamNamesFromContent_Positional(t *testing.T) {
+	content := "Hello {{1}}! Your order {{2}} is ready for pickup at {{3}}."
+	names := templateutil.ExtParamNames(content)
+
+	require.Len(t, names, 3)
+	assert.Equal(t, "1", names[0])
+	assert.Equal(t, "2", names[1])
+	assert.Equal(t, "3", names[2])
+}
+
+func TestExtractParamNamesFromContent_Named(t *testing.T) {
+	content := "Hi {{customer_name}}, your order {{order_id}} will arrive on {{delivery_date}}."
+	names := templateutil.ExtParamNames(content)
+
+	require.Len(t, names, 3)
+	assert.Equal(t, "customer_name", names[0])
+	assert.Equal(t, "order_id", names[1])
+	assert.Equal(t, "delivery_date", names[2])
+}
+
+func TestExtractParamNamesFromContent_Mixed(t *testing.T) {
+	content := "Hello {{name}}, your code is {{1}}."
+	names := templateutil.ExtParamNames(content)
+
+	require.Len(t, names, 2)
+	assert.Equal(t, "name", names[0])
+	assert.Equal(t, "1", names[1])
+}
+
+func TestExtractParamNamesFromContent_NoParams(t *testing.T) {
+	content := "This is a static message with no parameters."
+	names := templateutil.ExtParamNames(content)
+
+	assert.Nil(t, names)
+}
+
+func TestExtractParamNamesFromContent_DuplicateParams(t *testing.T) {
+	content := "Hello {{name}}, {{name}} is a great name!"
+	names := templateutil.ExtParamNames(content)
+
+	// Should deduplicate
+	require.Len(t, names, 1)
+	assert.Equal(t, "name", names[0])
+}
+
+func TestResolveParams_NamedMatch(t *testing.T) {
+	paramNames := []string{"customer_name", "order_id"}
+	params := map[string]string{
+		"customer_name": "John",
+		"order_id":      "ORD-123",
+	}
+
+	result := templateutil.ResolveParamsFromMap(paramNames, params)
+
+	require.Len(t, result, 2)
+	assert.Equal(t, "John", result[0])
+	assert.Equal(t, "ORD-123", result[1])
+}
+
+func TestResolveParams_PositionalMatch(t *testing.T) {
+	paramNames := []string{"1", "2"}
+	params := map[string]string{
+		"1": "First",
+		"2": "Second",
+	}
+
+	result := templateutil.ResolveParamsFromMap(paramNames, params)
+
+	require.Len(t, result, 2)
+	assert.Equal(t, "First", result[0])
+	assert.Equal(t, "Second", result[1])
+}
+
+func TestResolveParams_FallbackToPositional(t *testing.T) {
+	// Template has named params, but user sends positional
+	paramNames := []string{"name", "code"}
+	params := map[string]string{
+		"1": "John",
+		"2": "ABC123",
+	}
+
+	result := templateutil.ResolveParamsFromMap(paramNames, params)
+
+	require.Len(t, result, 2)
+	assert.Equal(t, "John", result[0])
+	assert.Equal(t, "ABC123", result[1])
+}
+
+func TestResolveParams_MissingParams(t *testing.T) {
+	paramNames := []string{"name", "order_id", "date"}
+	params := map[string]string{
+		"name": "John",
+		// order_id and date are missing
+	}
+
+	result := templateutil.ResolveParamsFromMap(paramNames, params)
+
+	require.Len(t, result, 3)
+	assert.Equal(t, "John", result[0])
+	assert.Equal(t, "", result[1]) // Missing - defaults to empty
+	assert.Equal(t, "", result[2]) // Missing - defaults to empty
+}
+
+func TestResolveParams_EmptyInputs(t *testing.T) {
+	// Empty param names
+	result1 := templateutil.ResolveParamsFromMap([]string{}, map[string]string{"a": "b"})
+	assert.Nil(t, result1)
+
+	// Empty params map
+	result2 := templateutil.ResolveParamsFromMap([]string{"a"}, map[string]string{})
+	assert.Nil(t, result2)
+
+	// Both empty
+	result3 := templateutil.ResolveParamsFromMap([]string{}, map[string]string{})
+	assert.Nil(t, result3)
+}
+
+func TestResolveParams_WrongParamNames(t *testing.T) {
+	// User sends different param names than template expects
+	paramNames := []string{"1", "2"} // Template expects positional
+	params := map[string]string{
+		"lastrec":  "Nifty",     // Wrong name
+		"misstime": "banknifty", // Wrong name
+	}
+
+	result := templateutil.ResolveParamsFromMap(paramNames, params)
+
+	require.Len(t, result, 2)
+	// Both should be empty since names don't match
+	assert.Equal(t, "", result[0])
+	assert.Equal(t, "", result[1])
 }

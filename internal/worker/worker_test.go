@@ -8,8 +8,11 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/shridarpatil/whatomate/internal/config"
+	"github.com/shridarpatil/whatomate/internal/crypto"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/shridarpatil/whatomate/internal/queue"
+	"github.com/shridarpatil/whatomate/internal/templateutil"
 	"github.com/shridarpatil/whatomate/pkg/whatsapp"
 	"github.com/shridarpatil/whatomate/test/testutil"
 	"github.com/stretchr/testify/assert"
@@ -36,6 +39,44 @@ func testWorker(t *testing.T) *Worker {
 	return w
 }
 
+// getOrCreateTestPermissions gets existing permissions or creates them for testing.
+func getOrCreateTestPermissions(t *testing.T, w *Worker) []models.Permission {
+	t.Helper()
+
+	var existingPerms []models.Permission
+	if err := w.DB.Order("resource, action").Find(&existingPerms).Error; err == nil && len(existingPerms) > 0 {
+		return existingPerms
+	}
+
+	// Create all default permissions if none exist
+	perms := models.DefaultPermissions()
+	for i := range perms {
+		perms[i].ID = uuid.New()
+	}
+	require.NoError(t, w.DB.Create(&perms).Error)
+	return perms
+}
+
+// createTestRole creates an admin role with all permissions for testing.
+func createTestRole(t *testing.T, w *Worker, orgID uuid.UUID) *models.CustomRole {
+	t.Helper()
+
+	// Get or create permissions
+	perms := getOrCreateTestPermissions(t, w)
+
+	role := &models.CustomRole{
+		BaseModel:      models.BaseModel{ID: uuid.New()},
+		OrganizationID: orgID,
+		Name:           "admin_" + uuid.New().String()[:8],
+		Description:    "Test admin role",
+		IsSystem:       false,
+		IsDefault:      false,
+		Permissions:    perms,
+	}
+	require.NoError(t, w.DB.Create(role).Error)
+	return role
+}
+
 func createTestCampaignData(t *testing.T, w *Worker) (*models.Organization, *models.WhatsAppAccount, *models.Template, *models.BulkMessageCampaign, *models.BulkMessageRecipient) {
 	t.Helper()
 
@@ -48,13 +89,16 @@ func createTestCampaignData(t *testing.T, w *Worker) (*models.Organization, *mod
 	}
 	require.NoError(t, w.DB.Create(org).Error)
 
+	// Create role for user
+	role := createTestRole(t, w, org.ID)
+
 	// Create user for CreatedBy foreign key
 	user := &models.User{
 		OrganizationID: org.ID,
 		Email:          "test-" + uniqueID + "@example.com",
 		PasswordHash:   "hashed",
 		FullName:       "Test User",
-		Role:           models.RoleAdmin,
+		RoleID:         &role.ID,
 		IsActive:       true,
 	}
 	require.NoError(t, w.DB.Create(user).Error)
@@ -203,95 +247,6 @@ func TestWorker_HandleRecipientJob_CampaignNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to load campaign")
 }
 
-func TestWorker_getOrCreateContact_CreatesNewContact(t *testing.T) {
-	w := testWorker(t)
-
-	// Create organization
-	org := &models.Organization{
-		Name: "Test Org " + uuid.New().String()[:8],
-		Slug: "test-org-" + uuid.New().String()[:8],
-	}
-	require.NoError(t, w.DB.Create(org).Error)
-
-	contact, err := w.getOrCreateContact(org.ID, "1234567890", "Test User")
-	require.NoError(t, err)
-	require.NotNil(t, contact)
-
-	assert.Equal(t, "1234567890", contact.PhoneNumber)
-	assert.Equal(t, "Test User", contact.ProfileName)
-	assert.Equal(t, org.ID, contact.OrganizationID)
-}
-
-func TestWorker_getOrCreateContact_NormalizesPhoneNumber(t *testing.T) {
-	w := testWorker(t)
-
-	// Create organization
-	org := &models.Organization{
-		Name: "Test Org " + uuid.New().String()[:8],
-		Slug: "test-org-" + uuid.New().String()[:8],
-	}
-	require.NoError(t, w.DB.Create(org).Error)
-
-	// Test with + prefix - should strip it
-	contact1, err := w.getOrCreateContact(org.ID, "+1234567890", "Test User")
-	require.NoError(t, err)
-	assert.Equal(t, "1234567890", contact1.PhoneNumber)
-
-	// Test finding existing contact with normalized number
-	contact2, err := w.getOrCreateContact(org.ID, "+1234567890", "Different Name")
-	require.NoError(t, err)
-	assert.Equal(t, contact1.ID, contact2.ID) // Should return same contact
-}
-
-func TestWorker_getOrCreateContact_FindsExistingContact(t *testing.T) {
-	w := testWorker(t)
-
-	// Create organization
-	org := &models.Organization{
-		Name: "Test Org " + uuid.New().String()[:8],
-		Slug: "test-org-" + uuid.New().String()[:8],
-	}
-	require.NoError(t, w.DB.Create(org).Error)
-
-	// Pre-create a contact
-	existingContact := &models.Contact{
-		OrganizationID: org.ID,
-		PhoneNumber:    "5556667777",
-		ProfileName:    "Existing Contact",
-	}
-	require.NoError(t, w.DB.Create(existingContact).Error)
-
-	// Should find existing contact
-	contact, err := w.getOrCreateContact(org.ID, "5556667777", "Different Name")
-	require.NoError(t, err)
-	assert.Equal(t, existingContact.ID, contact.ID)
-	assert.Equal(t, "Existing Contact", contact.ProfileName) // Name shouldn't change
-}
-
-func TestWorker_getOrCreateContact_FindsWithPlusPrefix(t *testing.T) {
-	w := testWorker(t)
-
-	// Create organization
-	org := &models.Organization{
-		Name: "Test Org " + uuid.New().String()[:8],
-		Slug: "test-org-" + uuid.New().String()[:8],
-	}
-	require.NoError(t, w.DB.Create(org).Error)
-
-	// Create contact with + prefix
-	existingContact := &models.Contact{
-		OrganizationID: org.ID,
-		PhoneNumber:    "+9876543210",
-		ProfileName:    "Plus Prefix Contact",
-	}
-	require.NoError(t, w.DB.Create(existingContact).Error)
-
-	// Search without + prefix should find it
-	contact, err := w.getOrCreateContact(org.ID, "9876543210", "Test")
-	require.NoError(t, err)
-	assert.Equal(t, existingContact.ID, contact.ID)
-}
-
 // createMinimalCampaignData creates the minimum data needed for campaign tests
 // Returns org, user, template, and campaign
 func createMinimalCampaignData(t *testing.T, w *Worker, status models.CampaignStatus) (*models.Organization, *models.User, *models.Template, *models.BulkMessageCampaign) {
@@ -304,12 +259,15 @@ func createMinimalCampaignData(t *testing.T, w *Worker, status models.CampaignSt
 	}
 	require.NoError(t, w.DB.Create(org).Error)
 
+	// Create role for user
+	role := createTestRole(t, w, org.ID)
+
 	user := &models.User{
 		OrganizationID: org.ID,
 		Email:          "test-" + uniqueID + "@example.com",
 		PasswordHash:   "hashed",
 		FullName:       "Test User",
-		Role:           models.RoleAdmin,
+		RoleID:         &role.ID,
 		IsActive:       true,
 	}
 	require.NoError(t, w.DB.Create(user).Error)
@@ -822,150 +780,236 @@ func TestWorker_HandleRecipientJob_TemplateParamSubstitution(t *testing.T) {
 	assert.NotContains(t, message.Content, "{{2}}")
 }
 
+func TestWorker_DecryptAccountSecrets_WithEncryptionKey(t *testing.T) {
+	w := &Worker{
+		Config: &config.Config{
+			App: config.AppConfig{EncryptionKey: "test-secret-key-for-aes256"},
+		},
+	}
+
+	// Encrypt a token
+	plainToken := "EAAI2ZCP4ZAMv8BQtest"
+	plainSecret := "app-secret-123"
+	encToken, err := crypto.Encrypt(plainToken, w.Config.App.EncryptionKey)
+	require.NoError(t, err)
+	encSecret, err := crypto.Encrypt(plainSecret, w.Config.App.EncryptionKey)
+	require.NoError(t, err)
+
+	// Verify they are actually encrypted
+	assert.True(t, crypto.IsEncrypted(encToken))
+	assert.True(t, crypto.IsEncrypted(encSecret))
+
+	account := &models.WhatsAppAccount{
+		AccessToken: encToken,
+		AppSecret:   encSecret,
+	}
+
+	w.decryptAccountSecrets(account)
+
+	assert.Equal(t, plainToken, account.AccessToken)
+	assert.Equal(t, plainSecret, account.AppSecret)
+}
+
+func TestWorker_DecryptAccountSecrets_NilConfig(t *testing.T) {
+	w := &Worker{}
+
+	account := &models.WhatsAppAccount{
+		AccessToken: "plain-token",
+		AppSecret:   "plain-secret",
+	}
+
+	w.decryptAccountSecrets(account)
+
+	// Should remain unchanged (no-op)
+	assert.Equal(t, "plain-token", account.AccessToken)
+	assert.Equal(t, "plain-secret", account.AppSecret)
+}
+
+func TestWorker_HandleRecipientJob_WithEncryptedToken(t *testing.T) {
+	w := testWorker(t)
+
+	encKey := "test-encryption-key-for-aes"
+	w.Config = &config.Config{
+		App: config.AppConfig{EncryptionKey: encKey},
+	}
+
+	org, account, template, campaign, recipient := createTestCampaignData(t, w)
+
+	// Encrypt the token in the DB (simulating production)
+	encToken, err := crypto.Encrypt("test-token", encKey)
+	require.NoError(t, err)
+	require.NoError(t, w.DB.Model(account).Updates(map[string]interface{}{
+		"access_token": encToken,
+		"api_version":  "v21.0",
+	}).Error)
+
+	// Create mock server that verifies the decrypted token arrives
+	var capturedAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		rw.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(rw).Encode(map[string]interface{}{
+			"messages": []map[string]interface{}{
+				{"id": "wamid.encrypted123"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	w.WhatsApp = whatsapp.NewWithBaseURL(w.Log, server.URL)
+
+	job := &queue.RecipientJob{
+		CampaignID:     campaign.ID,
+		RecipientID:    recipient.ID,
+		OrganizationID: org.ID,
+		PhoneNumber:    recipient.PhoneNumber,
+		RecipientName:  recipient.RecipientName,
+		TemplateParams: recipient.TemplateParams,
+	}
+
+	err = w.HandleRecipientJob(context.Background(), job)
+	require.NoError(t, err)
+
+	// Verify the decrypted token was sent to Meta API (not the encrypted one)
+	assert.Equal(t, "Bearer test-token", capturedAuth)
+	assert.NotContains(t, capturedAuth, "enc:")
+
+	// Verify recipient marked as sent
+	var updatedRecipient models.BulkMessageRecipient
+	require.NoError(t, w.DB.First(&updatedRecipient, recipient.ID).Error)
+	assert.Equal(t, models.MessageStatusSent, updatedRecipient.Status)
+	assert.Equal(t, "wamid.encrypted123", updatedRecipient.WhatsAppMessageID)
+
+	// Verify message record created
+	var message models.Message
+	require.NoError(t, w.DB.Where("template_name = ?", template.Name).Order("created_at desc").First(&message).Error)
+	assert.Equal(t, models.MessageStatusSent, message.Status)
+}
+
 // Unit tests for parameter resolution functions (no database required)
 
 func TestResolveTemplateParams_NamedParams(t *testing.T) {
-	template := &models.Template{
-		BodyContent: "Hello {{name}}, your order {{order_id}} is ready!",
-	}
+	bodyContent := "Hello {{name}}, your order {{order_id}} is ready!"
 	params := models.JSONB{
 		"name":     "John",
 		"order_id": "ORD-123",
 	}
 
-	result := resolveTemplateParams(template, params)
+	result := templateutil.ResolveParams(bodyContent, params)
 
 	assert.Equal(t, []string{"John", "ORD-123"}, result)
 }
 
 func TestResolveTemplateParams_PositionalParams(t *testing.T) {
-	template := &models.Template{
-		BodyContent: "Hello {{1}}, your order {{2}} is ready!",
-	}
+	bodyContent := "Hello {{1}}, your order {{2}} is ready!"
 	params := models.JSONB{
 		"1": "John",
 		"2": "ORD-123",
 	}
 
-	result := resolveTemplateParams(template, params)
+	result := templateutil.ResolveParams(bodyContent, params)
 
 	assert.Equal(t, []string{"John", "ORD-123"}, result)
 }
 
 func TestResolveTemplateParams_FallbackToPositional(t *testing.T) {
 	// Named params in template, but user provides positional params
-	template := &models.Template{
-		BodyContent: "Hello {{name}}, your order {{order_id}} is ready!",
-	}
+	bodyContent := "Hello {{name}}, your order {{order_id}} is ready!"
 	params := models.JSONB{
 		"1": "John",
 		"2": "ORD-123",
 	}
 
-	result := resolveTemplateParams(template, params)
+	result := templateutil.ResolveParams(bodyContent, params)
 
 	assert.Equal(t, []string{"John", "ORD-123"}, result)
 }
 
 func TestResolveTemplateParams_MixedParams(t *testing.T) {
 	// User provides some named, some positional
-	template := &models.Template{
-		BodyContent: "Hello {{name}}, your order {{order_id}} is ready!",
-	}
+	bodyContent := "Hello {{name}}, your order {{order_id}} is ready!"
 	params := models.JSONB{
 		"name": "John",
 		"2":    "ORD-123", // Positional fallback for second param
 	}
 
-	result := resolveTemplateParams(template, params)
+	result := templateutil.ResolveParams(bodyContent, params)
 
 	assert.Equal(t, []string{"John", "ORD-123"}, result)
 }
 
 func TestResolveTemplateParams_NoParams(t *testing.T) {
 	// Template without any parameters
-	template := &models.Template{
-		BodyContent: "Hello, your order is ready!",
-	}
+	bodyContent := "Hello, your order is ready!"
 	params := models.JSONB{
 		"1": "John",
 		"2": "ORD-123",
 	}
 
-	result := resolveTemplateParams(template, params)
+	result := templateutil.ResolveParams(bodyContent, params)
 
 	assert.Nil(t, result)
 }
 
 func TestResolveTemplateParams_EmptyParams(t *testing.T) {
-	template := &models.Template{
-		BodyContent: "Hello {{name}}!",
-	}
+	bodyContent := "Hello {{name}}!"
 	params := models.JSONB{}
 
-	result := resolveTemplateParams(template, params)
+	result := templateutil.ResolveParams(bodyContent, params)
 
 	assert.Nil(t, result)
 }
 
 func TestReplaceTemplateContent_NamedParams(t *testing.T) {
-	template := &models.Template{
-		BodyContent: "Hello {{name}}, your order {{order_id}} is ready!",
-	}
+	bodyContent := "Hello {{name}}, your order {{order_id}} is ready!"
 	content := "Hello {{name}}, your order {{order_id}} is ready!"
 	params := models.JSONB{
 		"name":     "John",
 		"order_id": "ORD-123",
 	}
 
-	result := replaceTemplateContent(template, content, params)
+	result := templateutil.ReplaceWithJSONBParams(bodyContent, content, params)
 
 	assert.Equal(t, "Hello John, your order ORD-123 is ready!", result)
 }
 
 func TestReplaceTemplateContent_PositionalParams(t *testing.T) {
-	template := &models.Template{
-		BodyContent: "Hello {{1}}, your order {{2}} is ready!",
-	}
+	bodyContent := "Hello {{1}}, your order {{2}} is ready!"
 	content := "Hello {{1}}, your order {{2}} is ready!"
 	params := models.JSONB{
 		"1": "John",
 		"2": "ORD-123",
 	}
 
-	result := replaceTemplateContent(template, content, params)
+	result := templateutil.ReplaceWithJSONBParams(bodyContent, content, params)
 
 	assert.Equal(t, "Hello John, your order ORD-123 is ready!", result)
 }
 
 func TestReplaceTemplateContent_NamedParamsWithPositionalInput(t *testing.T) {
 	// Template has named placeholders but user provides positional params
-	template := &models.Template{
-		BodyContent: "Hello {{name}}, your order {{order_id}} is ready!",
-	}
+	bodyContent := "Hello {{name}}, your order {{order_id}} is ready!"
 	content := "Hello {{name}}, your order {{order_id}} is ready!"
 	params := models.JSONB{
 		"1": "John",
 		"2": "ORD-123",
 	}
 
-	result := replaceTemplateContent(template, content, params)
+	result := templateutil.ReplaceWithJSONBParams(bodyContent, content, params)
 
 	assert.Equal(t, "Hello John, your order ORD-123 is ready!", result)
 }
 
 func TestReplaceTemplateContent_NoParams(t *testing.T) {
 	// Template without any parameters
-	template := &models.Template{
-		BodyContent: "Hello, your order is ready!",
-	}
+	bodyContent := "Hello, your order is ready!"
 	content := "Hello, your order is ready!"
 	params := models.JSONB{
 		"1": "John",
 		"2": "ORD-123",
 	}
 
-	result := replaceTemplateContent(template, content, params)
+	result := templateutil.ReplaceWithJSONBParams(bodyContent, content, params)
 
 	assert.Equal(t, "Hello, your order is ready!", result)
 }

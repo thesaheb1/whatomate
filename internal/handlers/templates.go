@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -12,9 +11,6 @@ import (
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/fastglue"
 )
-
-// parameterPattern matches template parameters like {{1}}, {{name}}, {{order_id}}
-var parameterPattern = regexp.MustCompile(`\{\{([^}]+)\}\}`)
 
 // TemplateRequest represents the request body for creating/updating a template
 type TemplateRequest struct {
@@ -53,15 +49,18 @@ type TemplateResponse struct {
 
 // ListTemplates returns all templates for the organization
 func (a *App) ListTemplates(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
+
+	pg := parsePagination(r)
 
 	// Optional filters
 	accountName := string(r.RequestCtx.QueryArgs().Peek("account")) // Filter by account name
 	status := string(r.RequestCtx.QueryArgs().Peek("status"))
 	category := string(r.RequestCtx.QueryArgs().Peek("category"))
+	search := string(r.RequestCtx.QueryArgs().Peek("search"))
 
 	query := a.DB.Where("organization_id = ?", orgID)
 
@@ -74,9 +73,16 @@ func (a *App) ListTemplates(r *fastglue.Request) error {
 	if category != "" {
 		query = query.Where("category = ?", category)
 	}
+	if search != "" {
+		query = query.Where("name ILIKE ? OR display_name ILIKE ?", "%"+search+"%", "%"+search+"%")
+	}
+
+	var total int64
+	query.Model(&models.Template{}).Count(&total)
 
 	var templates []models.Template
-	if err := query.Order("created_at DESC").Find(&templates).Error; err != nil {
+	if err := pg.Apply(query.Order("created_at DESC")).
+		Find(&templates).Error; err != nil {
 		a.Log.Error("Failed to list templates", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to list templates", nil, "")
 	}
@@ -86,21 +92,24 @@ func (a *App) ListTemplates(r *fastglue.Request) error {
 		response[i] = templateToResponse(t)
 	}
 
-	return r.SendEnvelope(map[string]interface{}{
+	return r.SendEnvelope(map[string]any{
 		"templates": response,
+		"total":     total,
+		"page":      pg.Page,
+		"limit":     pg.Limit,
 	})
 }
 
 // CreateTemplate creates a new message template
 func (a *App) CreateTemplate(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
 	var req TemplateRequest
-	if err := r.Decode(&req, "json"); err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid request body", nil, "")
+	if err := a.decodeRequest(r, &req); err != nil {
+		return nil
 	}
 
 	// Validate required fields
@@ -109,8 +118,7 @@ func (a *App) CreateTemplate(r *fastglue.Request) error {
 	}
 
 	// Verify account belongs to organization
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("name = ? AND organization_id = ?", req.WhatsAppAccount, orgID).First(&account).Error; err != nil {
+	if _, err := a.resolveWhatsAppAccount(orgID, req.WhatsAppAccount); err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "WhatsApp account not found", nil, "")
 	}
 
@@ -154,57 +162,49 @@ func (a *App) CreateTemplate(r *fastglue.Request) error {
 
 // GetTemplate returns a single template
 func (a *App) GetTemplate(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr, ok := r.RequestCtx.UserValue("id").(string)
-	if !ok || idStr == "" {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Missing template ID", nil, "")
-	}
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "template")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid template ID", nil, "")
+		return nil
 	}
 
-	var template models.Template
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&template).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Template not found", nil, "")
+	template, err := findByIDAndOrg[models.Template](a.DB, r, id, orgID, "Template")
+	if err != nil {
+		return nil
 	}
 
-	return r.SendEnvelope(templateToResponse(template))
+	return r.SendEnvelope(templateToResponse(*template))
 }
 
 // UpdateTemplate updates a message template
 func (a *App) UpdateTemplate(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr, ok := r.RequestCtx.UserValue("id").(string)
-	if !ok || idStr == "" {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Missing template ID", nil, "")
-	}
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "template")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid template ID", nil, "")
+		return nil
 	}
 
-	var template models.Template
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&template).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Template not found", nil, "")
+	template, err := findByIDAndOrg[models.Template](a.DB, r, id, orgID, "Template")
+	if err != nil {
+		return nil
 	}
 
-	// Cannot edit approved templates (Meta doesn't allow)
-	if template.Status == "APPROVED" {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Cannot edit approved templates", nil, "")
+	// When editing approved or rejected templates, set to DRAFT to indicate local changes pending submission
+	if template.Status == "APPROVED" || template.Status == "REJECTED" {
+		template.Status = "DRAFT"
 	}
 
 	var req TemplateRequest
-	if err := r.Decode(&req, "json"); err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid request body", nil, "")
+	if err := a.decodeRequest(r, &req); err != nil {
+		return nil
 	}
 
 	// Update fields
@@ -232,45 +232,40 @@ func (a *App) UpdateTemplate(r *fastglue.Request) error {
 		template.SampleValues = convertToJSONBArray(req.SampleValues)
 	}
 
-	if err := a.DB.Save(&template).Error; err != nil {
+	if err := a.DB.Save(template).Error; err != nil {
 		a.Log.Error("Failed to update template", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update template", nil, "")
 	}
 
-	return r.SendEnvelope(templateToResponse(template))
+	return r.SendEnvelope(templateToResponse(*template))
 }
 
 // DeleteTemplate deletes a message template
 func (a *App) DeleteTemplate(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr, ok := r.RequestCtx.UserValue("id").(string)
-	if !ok || idStr == "" {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Missing template ID", nil, "")
-	}
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "template")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid template ID", nil, "")
+		return nil
 	}
 
-	var template models.Template
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&template).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Template not found", nil, "")
+	template, err := findByIDAndOrg[models.Template](a.DB, r, id, orgID, "Template")
+	if err != nil {
+		return nil
 	}
 
 	// If template exists on Meta, delete it there too
 	if template.MetaTemplateID != "" {
-		var account models.WhatsAppAccount
-		if err := a.DB.Where("name = ? AND organization_id = ?", template.WhatsAppAccount, orgID).First(&account).Error; err == nil {
+		if account, err := a.resolveWhatsAppAccount(orgID, template.WhatsAppAccount); err == nil {
 			// Delete from Meta API
-			go a.deleteTemplateFromMeta(&account, template.Name)
+			go a.deleteTemplateFromMeta(account, template.Name)
 		}
 	}
 
-	if err := a.DB.Delete(&template).Error; err != nil {
+	if err := a.DB.Delete(template).Error; err != nil {
 		a.Log.Error("Failed to delete template", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to delete template", nil, "")
 	}
@@ -280,46 +275,37 @@ func (a *App) DeleteTemplate(r *fastglue.Request) error {
 
 // SubmitTemplate submits a template to Meta for approval
 func (a *App) SubmitTemplate(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr, ok := r.RequestCtx.UserValue("id").(string)
-	if !ok || idStr == "" {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Missing template ID", nil, "")
-	}
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "template")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid template ID", nil, "")
+		return nil
 	}
 
-	var template models.Template
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&template).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Template not found", nil, "")
+	template, err := findByIDAndOrg[models.Template](a.DB, r, id, orgID, "Template")
+	if err != nil {
+		return nil
 	}
 
-	// Check if already submitted and not rejected
-	if template.MetaTemplateID != "" && template.Status != "REJECTED" {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Template already submitted to Meta", nil, "")
+	// Only block if status is PENDING (awaiting approval - can't modify)
+	if template.MetaTemplateID != "" && template.Status == "PENDING" {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Template is pending approval and cannot be modified", nil, "")
 	}
 
 	// Get the WhatsApp account
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("name = ? AND organization_id = ?", template.WhatsAppAccount, orgID).First(&account).Error; err != nil {
+	account, err := a.resolveWhatsAppAccount(orgID, template.WhatsAppAccount)
+	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "WhatsApp account not found", nil, "")
 	}
 
-	// For rejected templates, delete the old one first then create new
-	if template.Status == "REJECTED" && template.MetaTemplateID != "" {
-		a.Log.Info("Deleting rejected template before resubmission", "template", template.Name)
-		a.deleteTemplateFromMeta(&account, template.Name)
-		// Clear the old meta template ID
-		template.MetaTemplateID = ""
-	}
+	// Check if this is an update to an existing template on Meta
+	isUpdate := template.MetaTemplateID != ""
 
 	// Submit template to Meta
-	metaTemplateID, submitErr := a.submitTemplateToMeta(&account, &template)
+	metaTemplateID, submitErr := a.submitTemplateToMeta(account, template)
 	if submitErr != nil {
 		a.Log.Error("Failed to submit template to Meta", "error", submitErr)
 		return r.SendErrorEnvelope(fasthttp.StatusBadGateway, "Failed to submit template to Meta: "+submitErr.Error(), nil, "")
@@ -327,34 +313,41 @@ func (a *App) SubmitTemplate(r *fastglue.Request) error {
 	template.MetaTemplateID = metaTemplateID
 
 	// Update template status
+	// Both new submissions and updates go to PENDING for approval
+	message := "Template submitted to Meta for approval"
+	if isUpdate {
+		message = "Template updated and pending re-approval"
+	}
 	template.Status = "PENDING"
-	if err := a.DB.Save(&template).Error; err != nil {
+
+	if err := a.DB.Save(template).Error; err != nil {
 		a.Log.Error("Failed to update template after submission", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Template submitted but failed to update local record", nil, "")
 	}
 
 	return r.SendEnvelope(map[string]interface{}{
-		"message":          "Template submitted to Meta for approval",
+		"message":          message,
 		"meta_template_id": metaTemplateID,
-		"status":           "PENDING",
-		"template":         templateToResponse(template),
+		"status":           template.Status,
+		"template":         templateToResponse(*template),
 	})
 }
 
-// submitTemplateToMeta submits a template to Meta's API
+// submitTemplateToMeta submits a template to Meta's API (creates new or updates existing)
 func (a *App) submitTemplateToMeta(account *models.WhatsAppAccount, template *models.Template) (string, error) {
 	waAccount := a.toWhatsAppAccount(account)
 
 	submission := &whatsapp.TemplateSubmission{
-		Name:          template.Name,
-		Language:      template.Language,
-		Category:      template.Category,
-		HeaderType:    template.HeaderType,
-		HeaderContent: template.HeaderContent,
-		BodyContent:   template.BodyContent,
-		FooterContent: template.FooterContent,
-		Buttons:       template.Buttons,
-		SampleValues:  template.SampleValues,
+		MetaTemplateID: template.MetaTemplateID, // If set, will update instead of create
+		Name:           template.Name,
+		Language:       template.Language,
+		Category:       template.Category,
+		HeaderType:     template.HeaderType,
+		HeaderContent:  template.HeaderContent,
+		BodyContent:    template.BodyContent,
+		FooterContent:  template.FooterContent,
+		Buttons:        template.Buttons,
+		SampleValues:   template.SampleValues,
 	}
 
 	ctx := context.Background()
@@ -363,7 +356,7 @@ func (a *App) submitTemplateToMeta(account *models.WhatsAppAccount, template *mo
 
 // SyncTemplates syncs templates from Meta API
 func (a *App) SyncTemplates(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
@@ -382,16 +375,16 @@ func (a *App) SyncTemplates(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "whatsapp_account is required", nil, "")
 	}
 
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("name = ? AND organization_id = ?", accountName, orgID).First(&account).Error; err != nil {
+	account, err := a.resolveWhatsAppAccount(orgID, accountName)
+	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "WhatsApp account not found", nil, "")
 	}
 
 	// Fetch templates from Meta API
-	templates, err := a.fetchTemplatesFromMeta(&account)
+	templates, err := a.fetchTemplatesFromMeta(account)
 	if err != nil {
 		a.Log.Error("Failed to fetch templates from Meta", "error", err)
-		return r.SendErrorEnvelope(fasthttp.StatusBadGateway, "Failed to fetch templates from Meta: "+err.Error(), nil, "")
+		return r.SendErrorEnvelope(fasthttp.StatusBadGateway, "Failed to fetch templates from Meta", nil, "")
 	}
 
 	// Sync to database
@@ -529,33 +522,10 @@ func convertFromJSONBArray(arr models.JSONBArray) []interface{} {
 	return []interface{}(arr)
 }
 
-// extractParameterNames extracts parameter names from template content
-// Supports both positional ({{1}}, {{2}}) and named ({{name}}, {{order_id}}) parameters
-// Returns parameter names in order of first occurrence, without duplicates
-func extractParameterNames(content string) []string {
-	matches := parameterPattern.FindAllStringSubmatch(content, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-
-	seen := make(map[string]bool)
-	var names []string
-	for _, match := range matches {
-		if len(match) > 1 {
-			name := strings.TrimSpace(match[1])
-			if name != "" && !seen[name] {
-				seen[name] = true
-				names = append(names, name)
-			}
-		}
-	}
-	return names
-}
-
 // UploadTemplateMedia uploads a media file for use as template header sample
 // Returns a file handle that can be used in template creation
 func (a *App) UploadTemplateMedia(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
@@ -570,8 +540,8 @@ func (a *App) UploadTemplateMedia(r *fastglue.Request) error {
 	}
 
 	// Verify account belongs to organization
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("name = ? AND organization_id = ?", accountName, orgID).First(&account).Error; err != nil {
+	account, err := a.resolveWhatsAppAccount(orgID, accountName)
+	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "WhatsApp account not found", nil, "")
 	}
 
@@ -590,7 +560,7 @@ func (a *App) UploadTemplateMedia(r *fastglue.Request) error {
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to open uploaded file", nil, "")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	// Read file data
 	fileData := make([]byte, fileHeader.Size)
@@ -618,14 +588,14 @@ func (a *App) UploadTemplateMedia(r *fastglue.Request) error {
 	}
 
 	// Create whatsapp account with AppID
-	waAccount := a.toWhatsAppAccount(&account)
+	waAccount := a.toWhatsAppAccount(account)
 
 	// Perform resumable upload to get handle
 	ctx := context.Background()
 	handle, err := a.WhatsApp.ResumableUpload(ctx, waAccount, fileData, mimeType, fileHeader.Filename)
 	if err != nil {
 		a.Log.Error("Failed to upload template media", "error", err)
-		return r.SendErrorEnvelope(fasthttp.StatusBadGateway, "Failed to upload media to Meta: "+err.Error(), nil, "")
+		return r.SendErrorEnvelope(fasthttp.StatusBadGateway, "Failed to upload media to Meta", nil, "")
 	}
 
 	return r.SendEnvelope(map[string]interface{}{

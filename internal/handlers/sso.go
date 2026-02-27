@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	appcrypto "github.com/shridarpatil/whatomate/internal/crypto"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/fastglue"
@@ -67,12 +68,12 @@ type SSOProviderPublic struct {
 
 // SSOProviderRequest represents SSO provider config from admin
 type SSOProviderRequest struct {
-	ClientID        string      `json:"client_id" validate:"required"`
-	ClientSecret    string      `json:"client_secret"`
-	IsEnabled       bool        `json:"is_enabled"`
-	AllowAutoCreate bool        `json:"allow_auto_create"`
-	DefaultRole     models.Role `json:"default_role"`
-	AllowedDomains  string      `json:"allowed_domains"`
+	ClientID        string `json:"client_id" validate:"required"`
+	ClientSecret    string `json:"client_secret"`
+	IsEnabled       bool   `json:"is_enabled"`
+	AllowAutoCreate bool   `json:"allow_auto_create"`
+	DefaultRole     string `json:"default_role"`
+	AllowedDomains  string `json:"allowed_domains"`
 	// Custom provider fields
 	AuthURL     string `json:"auth_url"`
 	TokenURL    string `json:"token_url"`
@@ -81,16 +82,16 @@ type SSOProviderRequest struct {
 
 // SSOProviderResponse represents SSO provider config response (masked secret)
 type SSOProviderResponse struct {
-	Provider        string      `json:"provider"`
-	ClientID        string      `json:"client_id"`
-	HasSecret       bool        `json:"has_secret"`
-	IsEnabled       bool        `json:"is_enabled"`
-	AllowAutoCreate bool        `json:"allow_auto_create"`
-	DefaultRole     models.Role `json:"default_role"`
-	AllowedDomains  string      `json:"allowed_domains"`
-	AuthURL         string      `json:"auth_url,omitempty"`
-	TokenURL        string      `json:"token_url,omitempty"`
-	UserInfoURL     string      `json:"user_info_url,omitempty"`
+	Provider        string `json:"provider"`
+	ClientID        string `json:"client_id"`
+	HasSecret       bool   `json:"has_secret"`
+	IsEnabled       bool   `json:"is_enabled"`
+	AllowAutoCreate bool   `json:"allow_auto_create"`
+	DefaultRole     string `json:"default_role"`
+	AllowedDomains  string `json:"allowed_domains"`
+	AuthURL         string `json:"auth_url,omitempty"`
+	TokenURL        string `json:"token_url,omitempty"`
+	UserInfoURL     string `json:"user_info_url,omitempty"`
 }
 
 // providerDisplayNames maps provider keys to display names
@@ -257,10 +258,10 @@ func (a *App) CallbackSSO(r *fastglue.Request) error {
 			a.redirectWithError(r, "Invalid email from provider")
 			return nil
 		}
-		emailDomain := strings.TrimSpace(emailParts[1])
+		emailDomain := strings.ToLower(strings.TrimSpace(emailParts[1]))
 		allowed := false
 		for _, d := range domains {
-			if strings.TrimSpace(d) == emailDomain {
+			if strings.ToLower(strings.TrimSpace(d)) == emailDomain {
 				allowed = true
 				break
 			}
@@ -281,16 +282,24 @@ func (a *App) CallbackSSO(r *fastglue.Request) error {
 		}
 
 		// Auto-create user in the SSO config's organization
-		role := ssoConfig.DefaultRole
-		if role == "" {
-			role = models.RoleAgent
+		roleName := ssoConfig.DefaultRoleName
+		if roleName == "" {
+			roleName = "agent"
+		}
+
+		// Look up the CustomRole by name for this organization
+		var customRole models.CustomRole
+		if err := a.DB.Where("organization_id = ? AND name = ?", orgID, roleName).First(&customRole).Error; err != nil {
+			a.Log.Error("Failed to find role for SSO user", "error", err, "role_name", roleName)
+			a.redirectWithError(r, "Failed to create user account: role not found")
+			return nil
 		}
 
 		user = models.User{
 			OrganizationID: orgID,
 			Email:          userInfo.Email,
 			FullName:       userInfo.Name,
-			Role:           role,
+			RoleID:         &customRole.ID,
 			IsActive:       true,
 			IsAvailable:    true,
 			SSOProvider:    provider,
@@ -301,6 +310,18 @@ func (a *App) CallbackSSO(r *fastglue.Request) error {
 			a.Log.Error("Failed to create SSO user", "error", err, "email", userInfo.Email)
 			a.redirectWithError(r, "Failed to create user account")
 			return nil
+		}
+
+		// Create UserOrganization entry
+		userOrg := models.UserOrganization{
+			UserID:         user.ID,
+			OrganizationID: orgID,
+			RoleID:         &customRole.ID,
+			IsDefault:      true,
+		}
+		if err := a.DB.Create(&userOrg).Error; err != nil {
+			a.Log.Error("Failed to create user organization entry for SSO user", "error", err)
+			// Non-fatal: user was already created
 		}
 
 		a.Log.Info("Created SSO user", "user_id", user.ID, "email", user.Email, "provider", provider)
@@ -334,15 +355,12 @@ func (a *App) CallbackSSO(r *fastglue.Request) error {
 		return nil
 	}
 
-	// Redirect to frontend with tokens in URL fragment
-	basePath := a.Config.Server.BasePath
-	if basePath == "" {
-		basePath = ""
-	} else if basePath[0] != '/' {
-		basePath = "/" + basePath
-	}
-	redirectURL := fmt.Sprintf("%s/auth/sso/callback#access_token=%s&refresh_token=%s&expires_in=%d",
-		basePath, accessToken, refreshToken, a.Config.JWT.AccessExpiryMins*60)
+	// Set auth cookies (tokens no longer exposed in URL)
+	a.setAuthCookies(r, accessToken, refreshToken)
+
+	// Redirect to frontend SSO callback page (cookies already set)
+	basePath := sanitizeRedirectPath(a.Config.Server.BasePath)
+	redirectURL := fmt.Sprintf("%s/auth/sso/callback", basePath)
 
 	r.RequestCtx.Redirect(redirectURL, fasthttp.StatusTemporaryRedirect)
 	return nil
@@ -350,7 +368,7 @@ func (a *App) CallbackSSO(r *fastglue.Request) error {
 
 // GetSSOSettings returns all SSO provider configs for the organization (admin only)
 func (a *App) GetSSOSettings(r *fastglue.Request) error {
-	orgID, err := a.getOrgIDFromContext(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
@@ -370,7 +388,7 @@ func (a *App) GetSSOSettings(r *fastglue.Request) error {
 			HasSecret:       p.ClientSecret != "",
 			IsEnabled:       p.IsEnabled,
 			AllowAutoCreate: p.AllowAutoCreate,
-			DefaultRole:     p.DefaultRole,
+			DefaultRole:     p.DefaultRoleName,
 			AllowedDomains:  p.AllowedDomains,
 			AuthURL:         p.AuthURL,
 			TokenURL:        p.TokenURL,
@@ -383,7 +401,7 @@ func (a *App) GetSSOSettings(r *fastglue.Request) error {
 
 // UpdateSSOProvider creates or updates an SSO provider config (admin only)
 func (a *App) UpdateSSOProvider(r *fastglue.Request) error {
-	orgID, err := a.getOrgIDFromContext(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
@@ -404,8 +422,8 @@ func (a *App) UpdateSSOProvider(r *fastglue.Request) error {
 	}
 
 	var req SSOProviderRequest
-	if err := r.Decode(&req, "json"); err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid request body", nil, "")
+	if err := a.decodeRequest(r, &req); err != nil {
+		return nil
 	}
 
 	// Validate custom provider fields
@@ -430,13 +448,18 @@ func (a *App) UpdateSSOProvider(r *fastglue.Request) error {
 	// Update fields
 	ssoConfig.ClientID = req.ClientID
 	if req.ClientSecret != "" {
-		ssoConfig.ClientSecret = req.ClientSecret
+		enc, err := appcrypto.Encrypt(req.ClientSecret, a.Config.App.EncryptionKey)
+		if err != nil {
+			a.Log.Error("Failed to encrypt SSO client secret", "error", err)
+			return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to save SSO configuration", nil, "")
+		}
+		ssoConfig.ClientSecret = enc
 	}
 	ssoConfig.IsEnabled = req.IsEnabled
 	ssoConfig.AllowAutoCreate = req.AllowAutoCreate
-	ssoConfig.DefaultRole = req.DefaultRole
-	if ssoConfig.DefaultRole == "" {
-		ssoConfig.DefaultRole = models.RoleAgent
+	ssoConfig.DefaultRoleName = req.DefaultRole
+	if ssoConfig.DefaultRoleName == "" {
+		ssoConfig.DefaultRoleName = "agent"
 	}
 	ssoConfig.AllowedDomains = req.AllowedDomains
 	ssoConfig.AuthURL = req.AuthURL
@@ -454,7 +477,7 @@ func (a *App) UpdateSSOProvider(r *fastglue.Request) error {
 		HasSecret:       ssoConfig.ClientSecret != "",
 		IsEnabled:       ssoConfig.IsEnabled,
 		AllowAutoCreate: ssoConfig.AllowAutoCreate,
-		DefaultRole:     ssoConfig.DefaultRole,
+		DefaultRole:     ssoConfig.DefaultRoleName,
 		AllowedDomains:  ssoConfig.AllowedDomains,
 		AuthURL:         ssoConfig.AuthURL,
 		TokenURL:        ssoConfig.TokenURL,
@@ -464,7 +487,7 @@ func (a *App) UpdateSSOProvider(r *fastglue.Request) error {
 
 // DeleteSSOProvider removes an SSO provider config (admin only)
 func (a *App) DeleteSSOProvider(r *fastglue.Request) error {
-	orgID, err := a.getOrgIDFromContext(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
@@ -508,15 +531,19 @@ func (a *App) buildOAuthConfig(provider string, ssoConfig *models.SSOProvider, r
 		scheme = "http"
 	}
 	host := string(r.RequestCtx.Host())
-	basePath := a.Config.Server.BasePath
-	if basePath != "" && basePath[0] != '/' {
-		basePath = "/" + basePath
-	}
+	basePath := sanitizeRedirectPath(a.Config.Server.BasePath)
 	callbackURL := fmt.Sprintf("%s://%s%s/api/auth/sso/%s/callback", scheme, host, basePath, provider)
+
+	// Decrypt SSO client secret
+	decryptedSecret, err := appcrypto.Decrypt(ssoConfig.ClientSecret, a.Config.App.EncryptionKey)
+	if err != nil {
+		a.Log.Error("Failed to decrypt SSO client secret", "error", err)
+		return nil
+	}
 
 	return &oauth2.Config{
 		ClientID:     ssoConfig.ClientID,
-		ClientSecret: ssoConfig.ClientSecret,
+		ClientSecret: decryptedSecret,
 		Endpoint:     endpoint,
 		Scopes:       scopes,
 		RedirectURL:  callbackURL,
@@ -539,8 +566,7 @@ func (a *App) fetchUserInfo(provider string, ssoConfig *models.SSOProvider, toke
 		userInfoURL = oauthProviders[provider].UserInfoURL
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("GET", userInfoURL, nil)
+	req, err := http.NewRequest(http.MethodGet, userInfoURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -550,7 +576,7 @@ func (a *App) fetchUserInfo(provider string, ssoConfig *models.SSOProvider, toke
 		req.Header.Set("Accept", "application/vnd.github+json")
 	}
 
-	resp, err := client.Do(req)
+	resp, err := a.HTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -623,7 +649,6 @@ func (a *App) fetchUserInfo(provider string, ssoConfig *models.SSOProvider, toke
 }
 
 func (a *App) fetchGitHubEmail(token *oauth2.Token) (string, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("GET", "https://api.github.com/user/emails", nil)
 	if err != nil {
 		return "", err
@@ -632,7 +657,7 @@ func (a *App) fetchGitHubEmail(token *oauth2.Token) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := client.Do(req)
+	resp, err := a.HTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -666,18 +691,36 @@ func (a *App) fetchGitHubEmail(token *oauth2.Token) (string, error) {
 }
 
 func (a *App) redirectWithError(r *fastglue.Request, message string) {
-	basePath := a.Config.Server.BasePath
-	if basePath != "" && basePath[0] != '/' {
-		basePath = "/" + basePath
-	}
+	basePath := sanitizeRedirectPath(a.Config.Server.BasePath)
 	encodedMsg := url.QueryEscape(message)
 	redirectURL := fmt.Sprintf("%s/login?sso_error=%s", basePath, encodedMsg)
 	r.RequestCtx.Redirect(redirectURL, fasthttp.StatusTemporaryRedirect)
 }
 
+// sanitizeRedirectPath ensures the path is safe for redirects by preventing
+// open redirect vulnerabilities (e.g., //evil.com or /\evil.com)
+func sanitizeRedirectPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	// Ensure path starts with /
+	if path[0] != '/' {
+		path = "/" + path
+	}
+	// Prevent protocol-relative URLs (//...) and backslash escapes (/\...)
+	// by stripping dangerous characters after the leading slash
+	for len(path) > 1 && (path[1] == '/' || path[1] == '\\') {
+		path = "/" + path[2:]
+	}
+	return path
+}
+
 func generateRandomString(n int) string {
 	b := make([]byte, n)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback: this should never happen but don't silently continue with zero bytes
+		panic("crypto/rand.Read failed: " + err.Error())
+	}
 	return base64.URLEncoding.EncodeToString(b)[:n]
 }
 

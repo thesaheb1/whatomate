@@ -36,22 +36,22 @@ export class CampaignsPage extends BasePage {
 
   getEditButton(card?: Locator): Locator {
     const container = card || this.page
-    return container.locator('button').filter({ has: this.page.locator('svg.lucide-pencil') }).first()
+    return container.locator('button').filter({ has: this.page.locator('.lucide-pencil') }).first()
   }
 
   getDeleteButton(card?: Locator): Locator {
     const container = card || this.page
-    return container.locator('button').filter({ has: this.page.locator('svg.lucide-trash-2') }).first()
+    return container.locator('button').filter({ has: this.page.locator('.lucide-trash-2') }).first()
   }
 
   getViewRecipientsButton(card?: Locator): Locator {
     const container = card || this.page
-    return container.locator('button').filter({ has: this.page.locator('svg.lucide-eye') }).first()
+    return container.locator('button').filter({ has: this.page.locator('.lucide-eye') }).first()
   }
 
   getAddRecipientsButton(card?: Locator): Locator {
     const container = card || this.page
-    return container.locator('button').filter({ has: this.page.locator('svg.lucide-user-plus') }).first()
+    return container.locator('button').filter({ has: this.page.locator('.lucide-user-plus') }).first()
   }
 
   getStartButton(card?: Locator): Locator {
@@ -157,6 +157,23 @@ export class CampaignsPage extends BasePage {
     // Template is typically the second combobox (after account)
     await templateTriggers.nth(1).click()
     await this.page.locator('[role="option"]').filter({ hasText: templateName }).click()
+  }
+
+  // Template dropdown helpers
+  getTemplateSelectTrigger(): Locator {
+    return this.createDialog.locator('button[role="combobox"]').nth(1)
+  }
+
+  getTemplateOptions(): Locator {
+    return this.page.locator('[role="option"]')
+  }
+
+  getNoTemplatesMessage(): Locator {
+    return this.createDialog.getByText(/No templates found/i)
+  }
+
+  async openTemplateDropdown() {
+    await this.getTemplateSelectTrigger().click()
   }
 
   // Recipients dialog helpers

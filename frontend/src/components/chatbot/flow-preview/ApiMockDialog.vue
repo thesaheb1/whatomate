@@ -69,13 +69,20 @@ watch(() => props.open, (isOpen) => {
   }
 })
 
+// Validate JSON and set error message
+watch(responseBody, (body) => {
+  try {
+    JSON.parse(body)
+    parseError.value = ''
+  } catch {
+    parseError.value = 'Invalid JSON'
+  }
+}, { immediate: true })
+
 const parsedResponse = computed(() => {
   try {
-    const parsed = JSON.parse(responseBody.value)
-    parseError.value = ''
-    return parsed
-  } catch (e) {
-    parseError.value = 'Invalid JSON'
+    return JSON.parse(responseBody.value)
+  } catch {
     return null
   }
 })
@@ -193,8 +200,7 @@ function handleSubmit() {
           </div>
           <Textarea
             v-model="responseBody"
-            class="font-mono text-sm min-h-[150px]"
-            :class="{ 'border-red-500': parseError }"
+            :class="'font-mono text-sm min-h-[150px]' + (parseError ? ' border-red-500' : '')"
             placeholder='{"key": "value"}'
           />
         </div>

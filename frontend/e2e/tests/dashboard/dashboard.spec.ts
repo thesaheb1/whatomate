@@ -10,16 +10,15 @@ test.describe('Dashboard', () => {
 
   test('should display dashboard page', async ({ page }) => {
     await expect(page.locator('h1')).toContainText('Dashboard')
-    await expect(page.locator('text=Overview of your messaging platform')).toBeVisible()
+    await expect(page.getByText('Customizable analytics overview')).toBeVisible()
   })
 
   test('should display stat cards', async ({ page }) => {
-    // Wait for stat cards to load (not skeleton) - use headings for specific matching
-    const main = page.locator('main')
-    await expect(main.getByRole('heading', { name: 'Total Messages' })).toBeVisible({ timeout: 15000 })
-    await expect(main.getByRole('heading', { name: 'Contacts' })).toBeVisible()
-    await expect(main.getByRole('heading', { name: 'Chatbot Sessions' })).toBeVisible()
-    await expect(main.getByRole('heading', { name: 'Campaigns Sent' })).toBeVisible()
+    // Wait for widget cards to load (not skeleton) - use exact text matching to avoid duplicates
+    await expect(page.getByText('Total Messages', { exact: true })).toBeVisible({ timeout: 15000 })
+    await expect(page.getByText('Active Contacts', { exact: true })).toBeVisible()
+    await expect(page.getByText('Chatbot Sessions', { exact: true })).toBeVisible()
+    await expect(page.getByText('Total Campaigns', { exact: true })).toBeVisible()
   })
 
   test('should display time range filter', async ({ page }) => {
@@ -42,15 +41,16 @@ test.describe('Dashboard', () => {
     await expect(page.locator('button[role="combobox"]').first()).toContainText('Last 7 days')
   })
 
-  test('should display recent messages section', async ({ page }) => {
-    await expect(page.locator('text=Recent Messages')).toBeVisible()
-    await expect(page.locator('text=Latest conversations from your contacts')).toBeVisible()
+  test('should display recent messages widget', async ({ page }) => {
+    // Widget names are displayed in spans, not headings
+    await expect(page.getByText('Recent Messages', { exact: true })).toBeVisible({ timeout: 15000 })
+    await expect(page.getByText('Latest conversations from your contacts')).toBeVisible()
   })
 
-  test('should display quick actions section', async ({ page }) => {
+  test('should display quick actions widget', async ({ page }) => {
     const main = page.locator('main')
-    await expect(main.locator('text=Quick Actions')).toBeVisible()
-    await expect(main.locator('text=Common tasks and shortcuts')).toBeVisible()
+    await expect(main.getByText('Quick Actions', { exact: true })).toBeVisible({ timeout: 15000 })
+    await expect(main.getByText('Common tasks and shortcuts')).toBeVisible()
 
     // Check for quick action links - scope to main to avoid sidebar duplicates
     await expect(main.locator('a[href="/chat"]')).toBeVisible()

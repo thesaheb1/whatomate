@@ -1,6 +1,8 @@
 import { useContactsStore } from '@/stores/contacts'
 import { useTransfersStore } from '@/stores/transfers'
+import { useCallingStore } from '@/stores/calling'
 import { useAuthStore } from '@/stores/auth'
+import { useNotesStore } from '@/stores/notes'
 import { toast } from 'vue-sonner'
 import router from '@/router'
 
@@ -39,6 +41,7 @@ function showNotification(title: string, body: string, contactId: string) {
 }
 
 // WebSocket message types
+const WS_TYPE_AUTH = 'auth'
 const WS_TYPE_NEW_MESSAGE = 'new_message'
 const WS_TYPE_STATUS_UPDATE = 'status_update'
 const WS_TYPE_SET_CONTACT = 'set_contact'
@@ -57,6 +60,33 @@ const WS_TYPE_TRANSFER_ESCALATION = 'transfer_escalation'
 // Campaign types
 const WS_TYPE_CAMPAIGN_STATS_UPDATE = 'campaign_stats_update'
 
+// Permission types
+const WS_TYPE_PERMISSIONS_UPDATED = 'permissions_updated'
+
+// Call types
+const WS_TYPE_CALL_INCOMING = 'call_incoming'
+const WS_TYPE_CALL_ANSWERED = 'call_answered'
+const WS_TYPE_CALL_ENDED = 'call_ended'
+
+// Call transfer types
+const WS_TYPE_CALL_TRANSFER_WAITING = 'call_transfer_waiting'
+const WS_TYPE_CALL_TRANSFER_CONNECTED = 'call_transfer_connected'
+const WS_TYPE_CALL_TRANSFER_COMPLETED = 'call_transfer_completed'
+const WS_TYPE_CALL_TRANSFER_ABANDONED = 'call_transfer_abandoned'
+const WS_TYPE_CALL_TRANSFER_NO_ANSWER = 'call_transfer_no_answer'
+
+// Outgoing call types
+const WS_TYPE_OUTGOING_CALL_INITIATED = 'outgoing_call_initiated'
+const WS_TYPE_OUTGOING_CALL_RINGING = 'outgoing_call_ringing'
+const WS_TYPE_OUTGOING_CALL_ANSWERED = 'outgoing_call_answered'
+const WS_TYPE_OUTGOING_CALL_REJECTED = 'outgoing_call_rejected'
+const WS_TYPE_OUTGOING_CALL_ENDED = 'outgoing_call_ended'
+
+// Conversation note types
+const WS_TYPE_CONVERSATION_NOTE_CREATED = 'conversation_note_created'
+const WS_TYPE_CONVERSATION_NOTE_UPDATED = 'conversation_note_updated'
+const WS_TYPE_CONVERSATION_NOTE_DELETED = 'conversation_note_deleted'
+
 interface WSMessage {
   type: string
   payload: any
@@ -71,25 +101,36 @@ class WebSocketService {
   private isConnected = false
   private hasConnectedBefore = false
   private campaignStatsCallbacks: ((payload: any) => void)[] = []
+  private getTokenFn: (() => Promise<string | null>) | null = null
 
-  connect(token: string) {
+  async connect(getToken?: () => Promise<string | null>) {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      console.log('WebSocket already connected')
+      return
+    }
+
+    // Store the token function for reconnects
+    if (getToken) {
+      this.getTokenFn = getToken
+    }
+
+    // Get a fresh short-lived WS token
+    const token = this.getTokenFn ? await this.getTokenFn() : null
+    if (!token) {
       return
     }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const host = window.location.host
     const basePath = ((window as any).__BASE_PATH__ ?? '').replace(/\/$/, '')
-    const url = `${protocol}//${host}${basePath}/ws?token=${token}`
-
-    console.log('Connecting to WebSocket...')
+    const url = `${protocol}//${host}${basePath}/ws`
 
     try {
       this.ws = new WebSocket(url)
 
       this.ws.onopen = () => {
-        console.log('WebSocket connected')
+        // Send auth message as the first message (token not in URL for security)
+        this.send({ type: WS_TYPE_AUTH, payload: { token } })
+
         const isReconnection = this.hasConnectedBefore
         this.isConnected = true
         this.hasConnectedBefore = true
@@ -98,7 +139,6 @@ class WebSocketService {
 
         // Force refresh data after reconnection to sync any missed updates
         if (isReconnection) {
-          console.log('WebSocket reconnected - refreshing data')
           this.refreshStaleData()
         }
       }
@@ -107,19 +147,17 @@ class WebSocketService {
         this.handleMessage(event.data)
       }
 
-      this.ws.onclose = (event) => {
-        console.log('WebSocket closed:', event.code, event.reason)
+      this.ws.onclose = () => {
         this.isConnected = false
         this.stopPing()
-        this.handleReconnect(token)
+        this.handleReconnect()
       }
 
-      this.ws.onerror = (error) => {
-        console.error('WebSocket error:', error)
+      this.ws.onerror = () => {
+        // Error handled by onclose
       }
-    } catch (error) {
-      console.error('Failed to create WebSocket:', error)
-      this.handleReconnect(token)
+    } catch {
+      this.handleReconnect()
     }
   }
 
@@ -136,8 +174,6 @@ class WebSocketService {
   private handleMessage(data: string) {
     try {
       const message: WSMessage = JSON.parse(data)
-      console.log('WebSocket message received:', message.type)
-
       const store = useContactsStore()
 
       switch (message.type) {
@@ -168,11 +204,47 @@ class WebSocketService {
         case WS_TYPE_CAMPAIGN_STATS_UPDATE:
           this.handleCampaignStatsUpdate(message.payload)
           break
+        case WS_TYPE_PERMISSIONS_UPDATED:
+          this.handlePermissionsUpdated()
+          break
+        case WS_TYPE_CALL_INCOMING:
+          this.handleCallIncoming(message.payload)
+          break
+        case WS_TYPE_CALL_ANSWERED:
+        case WS_TYPE_CALL_ENDED:
+          useCallingStore().handleCallEvent(message.type, message.payload)
+          break
+        case WS_TYPE_CALL_TRANSFER_WAITING:
+          this.handleCallTransferWaiting(message.payload)
+          break
+        case WS_TYPE_CALL_TRANSFER_CONNECTED:
+        case WS_TYPE_CALL_TRANSFER_COMPLETED:
+        case WS_TYPE_CALL_TRANSFER_ABANDONED:
+        case WS_TYPE_CALL_TRANSFER_NO_ANSWER:
+          useCallingStore().handleCallEvent(message.type, message.payload)
+          break
+        case WS_TYPE_OUTGOING_CALL_INITIATED:
+        case WS_TYPE_OUTGOING_CALL_RINGING:
+        case WS_TYPE_OUTGOING_CALL_ANSWERED:
+        case WS_TYPE_OUTGOING_CALL_REJECTED:
+        case WS_TYPE_OUTGOING_CALL_ENDED:
+          useCallingStore().handleCallEvent(message.type, message.payload)
+          break
+        case WS_TYPE_CONVERSATION_NOTE_CREATED:
+          useNotesStore().addNote(message.payload)
+          break
+        case WS_TYPE_CONVERSATION_NOTE_UPDATED:
+          useNotesStore().onNoteUpdated(message.payload)
+          break
+        case WS_TYPE_CONVERSATION_NOTE_DELETED:
+          useNotesStore().onNoteDeleted(message.payload.id)
+          break
         default:
-          console.log('Unknown message type:', message.type)
+          // Unknown message type, ignore
+          break
       }
-    } catch (error) {
-      console.error('Failed to parse WebSocket message:', error)
+    } catch {
+      // Failed to parse message, ignore
     }
   }
 
@@ -180,14 +252,6 @@ class WebSocketService {
     // Check if this message is for the current contact
     const currentContact = store.currentContact
     const isViewingThisContact = currentContact && payload.contact_id === currentContact.id
-
-    console.log('WebSocket: handleNewMessage', {
-      payload_contact_id: payload.contact_id,
-      current_contact_id: currentContact?.id,
-      isViewingThisContact,
-      direction: payload.direction,
-      assigned_user_id: payload.assigned_user_id
-    })
 
     if (isViewingThisContact) {
       // Add message to the store
@@ -229,13 +293,6 @@ class WebSocketService {
       // Check if new message alerts are enabled (default to true if not set)
       const alertsEnabled = settings.new_message_alerts !== false
 
-      console.log('WebSocket: notification check', {
-        currentUserId,
-        assigned_user_id: payload.assigned_user_id,
-        isAssignedToUser,
-        alertsEnabled
-      })
-
       if (isAssignedToUser && alertsEnabled) {
         const senderName = payload.profile_name || 'Unknown'
         const messagePreview = payload.content?.body || 'New message'
@@ -255,7 +312,7 @@ class WebSocketService {
   }
 
   private handleStatusUpdate(store: ReturnType<typeof useContactsStore>, payload: any) {
-    store.updateMessageStatus(payload.message_id, payload.status)
+    store.updateMessageStatus(payload.message_id, payload.status, payload.error_message)
   }
 
   private handleReactionUpdate(store: ReturnType<typeof useContactsStore>, payload: any) {
@@ -289,10 +346,10 @@ class WebSocketService {
     })
 
     // Refresh to get complete data including SLA fields
-    transfersStore.fetchTransfers()
+    transfersStore.fetchTransfers({ status: 'active' })
 
     // Show toast notification for admin/manager or assigned agent
-    const userRole = authStore.user?.role
+    const userRole = authStore.user?.role?.name
     const currentUserId = authStore.user?.id
     const isAssignedToMe = payload.agent_id === currentUserId
 
@@ -360,7 +417,7 @@ class WebSocketService {
     const shouldNotify = notifyIds.includes(currentUserId || '')
 
     // Also notify admins/managers
-    const userRole = authStore.user?.role
+    const userRole = authStore.user?.role?.name
     const isAdminOrManager = userRole === 'admin' || userRole === 'manager'
 
     if (shouldNotify || isAdminOrManager) {
@@ -382,9 +439,62 @@ class WebSocketService {
     }
   }
 
+  private handleCallIncoming(payload: any) {
+    const callingStore = useCallingStore()
+    callingStore.handleCallEvent('call_incoming', payload)
+
+    const contactName = payload.caller_phone || 'Unknown'
+    playNotificationSound()
+    toast.info('Incoming Call', {
+      description: `Call from ${contactName}`,
+      duration: 5000,
+      action: {
+        label: 'View',
+        onClick: () => router.push('/calling/logs')
+      }
+    })
+  }
+
+  private handleCallTransferWaiting(payload: any) {
+    const callingStore = useCallingStore()
+    callingStore.handleCallEvent('call_transfer_waiting', payload)
+
+    const contactName = payload.caller_phone || 'Unknown'
+    playNotificationSound()
+    toast.info('Incoming Call Transfer', {
+      description: `Call from ${contactName} waiting for an agent`,
+      duration: 10000,
+      action: {
+        label: 'Accept',
+        onClick: () => {
+          router.push('/calling/transfers')
+        }
+      }
+    })
+  }
+
   private handleCampaignStatsUpdate(payload: any) {
     // Notify all registered callbacks
     this.campaignStatsCallbacks.forEach(callback => callback(payload))
+  }
+
+  private async handlePermissionsUpdated() {
+    const authStore = useAuthStore()
+
+    // Refresh user data from server
+    const success = await authStore.refreshUserData()
+
+    if (success) {
+      toast.info('Permissions Updated', {
+        description: 'Your permissions have been updated. The page will refresh.',
+        duration: 3000
+      })
+
+      // Reload the page after a short delay to apply new permissions
+      setTimeout(() => {
+        window.location.reload()
+      }, 1500)
+    }
   }
 
   onCampaignStatsUpdate(callback: (payload: any) => void) {
@@ -398,18 +508,16 @@ class WebSocketService {
     }
   }
 
-  private handleReconnect(token: string) {
+  private handleReconnect() {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.log('Max reconnect attempts reached')
       return
     }
 
     this.reconnectAttempts++
     const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1)
-    console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`)
 
     setTimeout(() => {
-      this.connect(token)
+      this.connect()
     }, delay)
   }
 

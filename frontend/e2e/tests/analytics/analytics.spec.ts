@@ -32,9 +32,12 @@ test.describe('Agent Analytics', () => {
   })
 
   test('should display agent performance metrics', async ({ page }) => {
-    // Wait for stats cards to load - use headings for specific matching
-    await expect(page.getByRole('heading', { name: 'Transfers Handled' })).toBeVisible({ timeout: 10000 })
-    await expect(page.getByRole('heading', { name: 'Active Conversations' })).toBeVisible()
+    // Wait for loading to complete (skeleton should disappear)
+    await page.waitForSelector('.card-depth', { timeout: 15000 })
+
+    // Check stat card labels are visible (use exact match to avoid matching chart descriptions)
+    await expect(page.getByText('Transfers Handled', { exact: true })).toBeVisible()
+    await expect(page.getByText('Active Conversations', { exact: true })).toBeVisible()
   })
 })
 

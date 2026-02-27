@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -9,29 +10,37 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { toast } from 'vue-sonner'
 import { MessageSquare, Loader2 } from 'lucide-vue-next'
 
+const { t } = useI18n()
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
 
 const fullName = ref('')
 const email = ref('')
 const password = ref('')
 const confirmPassword = ref('')
-const organizationName = ref('')
 const isLoading = ref(false)
 
+const organizationId = computed(() => (route.query.org as string) || '')
+
 const handleRegister = async () => {
-  if (!fullName.value || !email.value || !password.value || !organizationName.value) {
-    toast.error('Please fill in all fields')
+  if (!organizationId.value) {
+    toast.error(t('auth.invitationRequired'))
+    return
+  }
+
+  if (!fullName.value || !email.value || !password.value) {
+    toast.error(t('auth.fillAllFields'))
     return
   }
 
   if (password.value !== confirmPassword.value) {
-    toast.error('Passwords do not match')
+    toast.error(t('auth.passwordsMismatch'))
     return
   }
 
   if (password.value.length < 8) {
-    toast.error('Password must be at least 8 characters')
+    toast.error(t('auth.passwordTooShort'))
     return
   }
 
@@ -42,12 +51,12 @@ const handleRegister = async () => {
       full_name: fullName.value,
       email: email.value,
       password: password.value,
-      organization_name: organizationName.value
+      organization_id: organizationId.value
     })
-    toast.success('Registration successful')
+    toast.success(t('auth.registrationSuccess'))
     router.push('/')
   } catch (error: any) {
-    const message = error.response?.data?.message || 'Registration failed'
+    const message = error.response?.data?.message || t('auth.registrationFailed')
     toast.error(message)
   } finally {
     isLoading.value = false
@@ -56,7 +65,7 @@ const handleRegister = async () => {
 </script>
 
 <template>
-  <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-green-50 to-green-100 dark:from-gray-900 dark:to-gray-800 p-4">
+  <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-900 to-gray-800 light:from-violet-50 light:to-violet-100 p-4">
     <Card class="w-full max-w-md">
       <CardHeader class="space-y-1 text-center">
         <div class="flex justify-center mb-4">
@@ -64,63 +73,73 @@ const handleRegister = async () => {
             <MessageSquare class="h-7 w-7 text-primary-foreground" />
           </div>
         </div>
-        <CardTitle class="text-2xl font-bold">Create an account</CardTitle>
+        <CardTitle class="text-2xl font-bold">{{ $t('auth.createAccount') }}</CardTitle>
         <CardDescription>
-          Start your WhatsApp Business journey with Whatomate
+          {{ $t('auth.createAccountDesc') }}
         </CardDescription>
       </CardHeader>
-      <form @submit.prevent="handleRegister">
+
+      <!-- No org ID in URL — show invitation required message -->
+      <template v-if="!organizationId">
+        <CardContent>
+          <div class="text-center py-4">
+            <p class="text-sm text-muted-foreground">
+              {{ $t('auth.invitationRequired') }}
+            </p>
+          </div>
+        </CardContent>
+        <CardFooter class="flex flex-col space-y-4">
+          <RouterLink to="/login" class="w-full">
+            <Button variant="outline" class="w-full">
+              {{ $t('auth.signIn') }}
+            </Button>
+          </RouterLink>
+        </CardFooter>
+      </template>
+
+      <!-- Has org ID — show registration form -->
+      <form v-else @submit.prevent="handleRegister">
         <CardContent class="space-y-4">
           <div class="space-y-2">
-            <Label for="fullName">Full Name</Label>
+            <Label for="fullName">{{ $t('auth.fullName') }}</Label>
             <Input
               id="fullName"
               v-model="fullName"
               type="text"
-              placeholder="John Doe"
+              :placeholder="$t('auth.fullNamePlaceholder')"
               :disabled="isLoading"
               autocomplete="name"
             />
           </div>
           <div class="space-y-2">
-            <Label for="email">Email</Label>
+            <Label for="email">{{ $t('common.email') }}</Label>
             <Input
               id="email"
               v-model="email"
               type="email"
-              placeholder="name@example.com"
+              :placeholder="$t('auth.emailPlaceholder')"
               :disabled="isLoading"
               autocomplete="email"
             />
           </div>
           <div class="space-y-2">
-            <Label for="organizationName">Organization Name</Label>
-            <Input
-              id="organizationName"
-              v-model="organizationName"
-              type="text"
-              placeholder="Your Company"
-              :disabled="isLoading"
-            />
-          </div>
-          <div class="space-y-2">
-            <Label for="password">Password</Label>
+            <Label for="password">{{ $t('auth.password') }}</Label>
             <Input
               id="password"
               v-model="password"
               type="password"
-              placeholder="At least 8 characters"
+              :placeholder="$t('auth.passwordMinLength')"
               :disabled="isLoading"
               autocomplete="new-password"
             />
           </div>
           <div class="space-y-2">
-            <Label for="confirmPassword">Confirm Password</Label>
+            <Label for="confirmPassword">{{ $t('auth.confirmPassword') }}</Label>
             <Input
               id="confirmPassword"
               v-model="confirmPassword"
               type="password"
-              placeholder="Confirm your password"
+              :placeholder="$t('auth.confirmPasswordPlaceholder')"
               :disabled="isLoading"
               autocomplete="new-password"
             />
@@ -129,12 +148,12 @@ const handleRegister = async () => {
         <CardFooter class="flex flex-col space-y-4">
           <Button type="submit" class="w-full" :disabled="isLoading">
             <Loader2 v-if="isLoading" class="mr-2 h-4 w-4 animate-spin" />
-            Create account
+            {{ $t('auth.createAccountBtn') }}
           </Button>
           <p class="text-sm text-center text-muted-foreground">
-            Already have an account?
+            {{ $t('auth.alreadyHaveAccount') }}
             <RouterLink to="/login" class="text-primary hover:underline">
-              Sign in
+              {{ $t('auth.signIn') }}
             </RouterLink>
           </p>
         </CardFooter>

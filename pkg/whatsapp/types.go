@@ -76,8 +76,9 @@ type TemplateButton struct {
 
 // TemplateExample represents example values for template variables
 type TemplateExample struct {
-	HeaderText []string   `json:"header_text,omitempty"`
-	BodyText   [][]string `json:"body_text,omitempty"`
+	HeaderText   []string   `json:"header_text,omitempty"`
+	HeaderHandle []string   `json:"header_handle,omitempty"`
+	BodyText     [][]string `json:"body_text,omitempty"`
 }
 
 // TemplateListResponse represents response from fetching templates
@@ -275,4 +276,28 @@ type ProductListResponse struct {
 // ProductCreateResponse represents response from creating a product
 type ProductCreateResponse struct {
 	ID string `json:"id"`
+}
+
+// BusinessProfile represents the business profile of a phone number
+type BusinessProfile struct {
+	MessagingProduct string   `json:"messaging_product"`
+	Address          string   `json:"address"`
+	Description      string   `json:"description"`
+	Vertical         string   `json:"vertical"`
+	Email            string   `json:"email"`
+	Websites         []string `json:"websites"`
+	ProfilePicture   string   `json:"profile_picture_url"`
+	About            string   `json:"about"` // Status text
+}
+
+// BusinessProfileInput represents the input for updating a business profile
+type BusinessProfileInput struct {
+	MessagingProduct     string   `json:"messaging_product"`
+	Address              string   `json:"address,omitempty"`
+	Description          string   `json:"description,omitempty"`
+	Vertical             string   `json:"vertical,omitempty"`
+	Email                string   `json:"email,omitempty"`
+	Websites             []string `json:"websites,omitempty"`
+	ProfilePictureHandle string   `json:"profile_picture_handle,omitempty"`
+	About                string   `json:"about,omitempty"`
 }

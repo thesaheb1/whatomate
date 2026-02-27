@@ -48,26 +48,38 @@ func generateAPIKey() (string, error) {
 	return "whm_" + hex.EncodeToString(bytes), nil
 }
 
-// ListAPIKeys returns all API keys for the organization (admin only)
+// ListAPIKeys returns all API keys for the organization
 func (a *App) ListAPIKeys(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, userID, err := a.getOrgAndUserID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	// Check if user is admin
-	role, _ := r.RequestCtx.UserValue("role").(models.Role)
-	if role != models.RoleAdmin {
-		return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Admin access required", nil, "")
+	if err := a.requirePermission(r, userID, models.ResourceAPIKeys, models.ActionRead); err != nil {
+		return nil
 	}
 
+	pg := parsePagination(r)
+	search := string(r.RequestCtx.QueryArgs().Peek("search"))
+
+	query := a.DB.Model(&models.APIKey{}).Where("organization_id = ?", orgID)
+
+	// Apply search filter - search by name or key prefix (case-insensitive)
+	if search != "" {
+		searchPattern := "%" + search + "%"
+		query = query.Where("name ILIKE ? OR key_prefix ILIKE ?", searchPattern, searchPattern)
+	}
+
+	var total int64
+	query.Count(&total)
+
 	var apiKeys []models.APIKey
-	if err := a.DB.Where("organization_id = ?", orgID).Order("created_at DESC").Find(&apiKeys).Error; err != nil {
+	if err := pg.Apply(query.Order("created_at DESC")).
+		Find(&apiKeys).Error; err != nil {
 		a.Log.Error("Failed to list API keys", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to list API keys", nil, "")
 	}
 
-	// Convert to response format
 	response := make([]APIKeyResponse, len(apiKeys))
 	for i, key := range apiKeys {
 		response[i] = APIKeyResponse{
@@ -81,27 +93,28 @@ func (a *App) ListAPIKeys(r *fastglue.Request) error {
 		}
 	}
 
-	return r.SendEnvelope(response)
+	return r.SendEnvelope(map[string]any{
+		"api_keys": response,
+		"total":    total,
+		"page":     pg.Page,
+		"limit":    pg.Limit,
+	})
 }
 
-// CreateAPIKey creates a new API key (admin only)
+// CreateAPIKey creates a new API key
 func (a *App) CreateAPIKey(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, userID, err := a.getOrgAndUserID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	userID, _ := r.RequestCtx.UserValue("user_id").(uuid.UUID)
-
-	// Check if user is admin
-	role, _ := r.RequestCtx.UserValue("role").(models.Role)
-	if role != models.RoleAdmin {
-		return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Admin access required", nil, "")
+	if err := a.requirePermission(r, userID, models.ResourceAPIKeys, models.ActionWrite); err != nil {
+		return nil
 	}
 
 	var req APIKeyRequest
-	if err := r.Decode(&req, "json"); err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid request body", nil, "")
+	if err := a.decodeRequest(r, &req); err != nil {
+		return nil
 	}
 
 	// Validate required fields
@@ -133,8 +146,8 @@ func (a *App) CreateAPIKey(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create API key", nil, "")
 	}
 
-	// Extract prefix (first 8 chars after "whm_")
-	keyPrefix := fullKey[4:12]
+	// Extract prefix (first 16 chars after "whm_")
+	keyPrefix := fullKey[4:20]
 
 	apiKey := models.APIKey{
 		OrganizationID: orgID,
@@ -162,23 +175,20 @@ func (a *App) CreateAPIKey(r *fastglue.Request) error {
 	})
 }
 
-// DeleteAPIKey revokes an API key (admin only)
+// DeleteAPIKey revokes an API key
 func (a *App) DeleteAPIKey(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, userID, err := a.getOrgAndUserID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	// Check if user is admin
-	role, _ := r.RequestCtx.UserValue("role").(models.Role)
-	if role != models.RoleAdmin {
-		return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Admin access required", nil, "")
+	if err := a.requirePermission(r, userID, models.ResourceAPIKeys, models.ActionDelete); err != nil {
+		return nil
 	}
 
-	idStr := r.RequestCtx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "API key")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid API key ID", nil, "")
+		return nil
 	}
 
 	result := a.DB.Where("id = ? AND organization_id = ?", id, orgID).Delete(&models.APIKey{})

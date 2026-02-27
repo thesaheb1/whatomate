@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -9,25 +10,17 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList
-} from '@/components/ui/command'
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
+import { PageHeader } from '@/components/shared'
 import { toast } from 'vue-sonner'
 import { Bot, Loader2, Brain, Plus, X, Clock, AlertTriangle, UserPlus, MessageSquare, Users } from 'lucide-vue-next'
-import { usersService, chatbotService } from '@/services/api'
+import { chatbotService } from '@/services/api'
+import { useUsersStore } from '@/stores/users'
+
+const { t } = useI18n()
+const usersStore = useUsersStore()
 
 const isSubmitting = ref(false)
 const isLoading = ref(true)
@@ -45,7 +38,15 @@ interface BusinessHour {
   end_time: string
 }
 
-const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+const daysOfWeek = computed(() => [
+  t('chatbotSettings.sunday'),
+  t('chatbotSettings.monday'),
+  t('chatbotSettings.tuesday'),
+  t('chatbotSettings.wednesday'),
+  t('chatbotSettings.thursday'),
+  t('chatbotSettings.friday'),
+  t('chatbotSettings.saturday')
+])
 
 const defaultBusinessHours: BusinessHour[] = [
   { day: 0, enabled: false, start_time: '09:00', end_time: '17:00' },
@@ -75,7 +76,7 @@ const chatbotSettings = ref({
 // Button management functions
 const addGreetingButton = () => {
   if (chatbotSettings.value.greeting_buttons.length >= 10) {
-    toast.error('Maximum 10 buttons allowed')
+    toast.error(t('chatbotSettings.maxButtonsError'))
     return
   }
   const id = `btn_${Date.now()}`
@@ -88,7 +89,7 @@ const removeGreetingButton = (index: number) => {
 
 const addFallbackButton = () => {
   if (chatbotSettings.value.fallback_buttons.length >= 10) {
-    toast.error('Maximum 10 buttons allowed')
+    toast.error(t('chatbotSettings.maxButtonsError'))
     return
   }
   const id = `btn_${Date.now()}`
@@ -172,18 +173,15 @@ watch(isSLAEnabled, (newValue) => {
 
 onMounted(async () => {
   try {
-    const [chatbotResponse, usersResponse] = await Promise.all([
+    const [chatbotResponse] = await Promise.all([
       chatbotService.getSettings(),
-      usersService.list()
+      usersStore.fetchUsers()
     ])
 
     // Users for escalation notify
-    const usersData = usersResponse.data.data || usersResponse.data
-    const usersList = usersData.users || usersData || []
-    availableUsers.value = usersList.filter((u: any) => u.is_active !== false).map((u: any) => ({
-      id: u.id,
-      full_name: u.full_name
-    }))
+    availableUsers.value = usersStore.users
+      .filter((u) => u.is_active !== false)
+      .map((u) => ({ id: u.id, full_name: u.full_name }))
 
     // Chatbot settings
     const chatbotData = chatbotResponse.data.data || chatbotResponse.data
@@ -250,12 +248,12 @@ onMounted(async () => {
 async function saveMessagesSettings() {
   const invalidGreetingBtn = chatbotSettings.value.greeting_buttons.find(btn => !btn.title.trim())
   if (invalidGreetingBtn) {
-    toast.error('All greeting buttons must have a title')
+    toast.error(t('chatbotSettings.greetingButtonsRequired'))
     return
   }
   const invalidFallbackBtn = chatbotSettings.value.fallback_buttons.find(btn => !btn.title.trim())
   if (invalidFallbackBtn) {
-    toast.error('All fallback buttons must have a title')
+    toast.error(t('chatbotSettings.fallbackButtonsRequired'))
     return
   }
 
@@ -268,9 +266,9 @@ async function saveMessagesSettings() {
       fallback_buttons: chatbotSettings.value.fallback_buttons.filter(btn => btn.title.trim()),
       session_timeout_minutes: chatbotSettings.value.session_timeout_minutes
     })
-    toast.success('Messages settings saved')
+    toast.success(t('chatbotSettings.messagesSaved'))
   } catch (error) {
-    toast.error('Failed to save settings')
+    toast.error(t('common.failedSave', { resource: t('resources.chatbotSettings') }))
   } finally {
     isSubmitting.value = false
   }
@@ -284,9 +282,9 @@ async function saveAgentSettings() {
       assign_to_same_agent: chatbotSettings.value.assign_to_same_agent,
       agent_current_conversation_only: chatbotSettings.value.agent_current_conversation_only
     })
-    toast.success('Agent settings saved')
+    toast.success(t('chatbotSettings.agentSettingsSaved'))
   } catch (error) {
-    toast.error('Failed to save settings')
+    toast.error(t('common.failedSave', { resource: t('resources.chatbotSettings') }))
   } finally {
     isSubmitting.value = false
   }
@@ -301,9 +299,9 @@ async function saveBusinessHoursSettings() {
       out_of_hours_message: chatbotSettings.value.out_of_hours_message,
       allow_automated_outside_hours: chatbotSettings.value.allow_automated_outside_hours
     })
-    toast.success('Business hours saved')
+    toast.success(t('chatbotSettings.businessHoursSaved'))
   } catch (error) {
-    toast.error('Failed to save settings')
+    toast.error(t('common.failedSave', { resource: t('resources.chatbotSettings') }))
   } finally {
     isSubmitting.value = false
   }
@@ -323,10 +321,10 @@ async function saveAISettings() {
       payload.ai_api_key = aiSettings.value.ai_api_key
     }
     await chatbotService.updateSettings(payload)
-    toast.success('AI settings saved')
+    toast.success(t('chatbotSettings.aiSettingsSaved'))
     aiSettings.value.ai_api_key = ''
   } catch (error) {
-    toast.error('Failed to save AI settings')
+    toast.error(t('chatbotSettings.aiSaveFailed'))
   } finally {
     isSubmitting.value = false
   }
@@ -350,9 +348,9 @@ async function saveSLASettings() {
       client_auto_close_minutes: slaSettings.value.client_auto_close_minutes,
       client_auto_close_message: slaSettings.value.client_auto_close_message
     })
-    toast.success('SLA settings saved')
+    toast.success(t('chatbotSettings.slaSettingsSaved'))
   } catch (error) {
-    toast.error('Failed to save SLA settings')
+    toast.error(t('chatbotSettings.slaSaveFailed'))
   } finally {
     isSubmitting.value = false
   }
@@ -374,42 +372,31 @@ function removeEscalationUser(userId: string) {
 </script>
 
 <template>
-  <div class="flex flex-col h-full">
-    <!-- Header -->
-    <header class="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div class="flex h-16 items-center px-6">
-        <Bot class="h-5 w-5 mr-3" />
-        <div class="flex-1">
-          <h1 class="text-xl font-semibold">Chatbot Settings</h1>
-          <p class="text-sm text-muted-foreground">Configure chatbot behavior, agents, and automation</p>
-        </div>
-      </div>
-    </header>
-
-    <!-- Content -->
+  <div class="flex flex-col h-full bg-[#0a0a0b] light:bg-gray-50">
+    <PageHeader :title="$t('chatbotSettings.title')" :subtitle="$t('chatbotSettings.subtitle')" :icon="Bot" icon-gradient="bg-gradient-to-br from-purple-500 to-pink-600 shadow-purple-500/20" />
     <ScrollArea class="flex-1">
       <div class="p-6 space-y-4 max-w-4xl mx-auto">
         <Tabs default-value="messages" class="w-full">
           <TabsList class="grid w-full grid-cols-5 mb-6">
             <TabsTrigger value="messages">
               <MessageSquare class="h-4 w-4 mr-2" />
-              Messages
+              {{ $t('chatbotSettings.messages') }}
             </TabsTrigger>
             <TabsTrigger value="agents">
               <Users class="h-4 w-4 mr-2" />
-              Agents
+              {{ $t('chatbotSettings.agents') }}
             </TabsTrigger>
             <TabsTrigger value="hours">
               <Clock class="h-4 w-4 mr-2" />
-              Hours
+              {{ $t('chatbotSettings.hours') }}
             </TabsTrigger>
             <TabsTrigger value="sla">
               <AlertTriangle class="h-4 w-4 mr-2" />
-              SLA
+              {{ $t('chatbotSettings.sla') }}
             </TabsTrigger>
             <TabsTrigger value="ai">
               <Brain class="h-4 w-4 mr-2" />
-              AI
+              {{ $t('chatbotSettings.ai') }}
             </TabsTrigger>
           </TabsList>
 
@@ -417,21 +404,21 @@ function removeEscalationUser(userId: string) {
           <TabsContent value="messages">
             <Card>
               <CardHeader>
-                <CardTitle>Messages</CardTitle>
-                <CardDescription>Configure greeting, fallback messages and session timeout</CardDescription>
+                <CardTitle>{{ $t('chatbotSettings.messagesTitle') }}</CardTitle>
+                <CardDescription>{{ $t('chatbotSettings.messagesDesc') }}</CardDescription>
               </CardHeader>
               <CardContent class="space-y-4">
                 <div class="space-y-2">
-                  <Label for="greeting">Greeting Message</Label>
+                  <Label for="greeting">{{ $t('chatbotSettings.greetingMessage') }}</Label>
                   <Textarea
                     id="greeting"
                     v-model="chatbotSettings.greeting_message"
-                    placeholder="Hello! How can I help you?"
+                    :placeholder="$t('chatbotSettings.greetingPlaceholder') + '...'"
                     :rows="2"
                   />
                   <div class="mt-2">
                     <div class="flex items-center justify-between mb-2">
-                      <Label class="text-sm text-muted-foreground">Quick Reply Buttons (optional)</Label>
+                      <Label class="text-sm text-muted-foreground">{{ $t('chatbotSettings.quickReplyButtons') }}</Label>
                       <Button
                         variant="outline"
                         size="sm"
@@ -439,7 +426,7 @@ function removeEscalationUser(userId: string) {
                         :disabled="chatbotSettings.greeting_buttons.length >= 10"
                       >
                         <Plus class="h-4 w-4 mr-1" />
-                        Add Button
+                        {{ $t('chatbotSettings.addButton') }}
                       </Button>
                     </div>
                     <div v-if="chatbotSettings.greeting_buttons.length > 0" class="space-y-2">
@@ -450,7 +437,7 @@ function removeEscalationUser(userId: string) {
                       >
                         <Input
                           v-model="button.title"
-                          placeholder="Button text (max 20 chars)"
+                          :placeholder="$t('chatbotSettings.buttonPlaceholder') + '...'"
                           maxlength="20"
                           class="flex-1"
                         />
@@ -458,7 +445,7 @@ function removeEscalationUser(userId: string) {
                           <X class="h-4 w-4" />
                         </Button>
                       </div>
-                      <p class="text-xs text-muted-foreground">1-3 buttons show as reply buttons, 4-10 show as a list menu</p>
+                      <p class="text-xs text-muted-foreground">{{ $t('chatbotSettings.buttonHint') }}</p>
                     </div>
                   </div>
                 </div>
@@ -466,16 +453,16 @@ function removeEscalationUser(userId: string) {
                 <Separator />
 
                 <div class="space-y-2">
-                  <Label for="fallback">Fallback Message</Label>
+                  <Label for="fallback">{{ $t('chatbotSettings.fallbackMessage') }}</Label>
                   <Textarea
                     id="fallback"
                     v-model="chatbotSettings.fallback_message"
-                    placeholder="Sorry, I didn't understand that."
+                    :placeholder="$t('chatbotSettings.fallbackPlaceholder') + '...'"
                     :rows="2"
                   />
                   <div class="mt-2">
                     <div class="flex items-center justify-between mb-2">
-                      <Label class="text-sm text-muted-foreground">Quick Reply Buttons (optional)</Label>
+                      <Label class="text-sm text-muted-foreground">{{ $t('chatbotSettings.quickReplyButtons') }}</Label>
                       <Button
                         variant="outline"
                         size="sm"
@@ -483,7 +470,7 @@ function removeEscalationUser(userId: string) {
                         :disabled="chatbotSettings.fallback_buttons.length >= 10"
                       >
                         <Plus class="h-4 w-4 mr-1" />
-                        Add Button
+                        {{ $t('chatbotSettings.addButton') }}
                       </Button>
                     </div>
                     <div v-if="chatbotSettings.fallback_buttons.length > 0" class="space-y-2">
@@ -494,7 +481,7 @@ function removeEscalationUser(userId: string) {
                       >
                         <Input
                           v-model="button.title"
-                          placeholder="Button text (max 20 chars)"
+                          :placeholder="$t('chatbotSettings.buttonPlaceholder') + '...'"
                           maxlength="20"
                           class="flex-1"
                         />
@@ -502,7 +489,7 @@ function removeEscalationUser(userId: string) {
                           <X class="h-4 w-4" />
                         </Button>
                       </div>
-                      <p class="text-xs text-muted-foreground">1-3 buttons show as reply buttons, 4-10 show as a list menu</p>
+                      <p class="text-xs text-muted-foreground">{{ $t('chatbotSettings.buttonHint') }}</p>
                     </div>
                   </div>
                 </div>
@@ -510,7 +497,7 @@ function removeEscalationUser(userId: string) {
                 <Separator />
 
                 <div class="space-y-2">
-                  <Label for="timeout">Session Timeout (minutes)</Label>
+                  <Label for="timeout">{{ $t('chatbotSettings.sessionTimeout') }}</Label>
                   <Input
                     id="timeout"
                     v-model.number="chatbotSettings.session_timeout_minutes"
@@ -519,13 +506,13 @@ function removeEscalationUser(userId: string) {
                     max="120"
                     class="w-32"
                   />
-                  <p class="text-xs text-muted-foreground">Time before a conversation session expires</p>
+                  <p class="text-xs text-muted-foreground">{{ $t('chatbotSettings.sessionTimeoutHint') }}</p>
                 </div>
 
                 <div class="flex justify-end pt-2">
                   <Button @click="saveMessagesSettings" :disabled="isSubmitting">
                     <Loader2 v-if="isSubmitting" class="mr-2 h-4 w-4 animate-spin" />
-                    Save Changes
+                    {{ $t('chatbotSettings.saveChanges') }}
                   </Button>
                 </div>
               </CardContent>
@@ -536,14 +523,14 @@ function removeEscalationUser(userId: string) {
           <TabsContent value="agents">
             <Card>
               <CardHeader>
-                <CardTitle>Agent Settings</CardTitle>
-                <CardDescription>Configure transfer queue and agent assignment options</CardDescription>
+                <CardTitle>{{ $t('chatbotSettings.agentSettings') }}</CardTitle>
+                <CardDescription>{{ $t('chatbotSettings.agentSettingsDesc') }}</CardDescription>
               </CardHeader>
               <CardContent class="space-y-4">
                 <div class="flex items-center justify-between py-2">
                   <div>
-                    <p class="font-medium">Allow Agents to Pick from Queue</p>
-                    <p class="text-sm text-muted-foreground">When enabled, agents can self-assign transfers from the queue</p>
+                    <p class="font-medium">{{ $t('chatbotSettings.allowQueuePickup') }}</p>
+                    <p class="text-sm text-muted-foreground">{{ $t('chatbotSettings.allowQueuePickupDesc') }}</p>
                   </div>
                   <Switch
                     :checked="chatbotSettings.allow_agent_queue_pickup"
@@ -555,8 +542,8 @@ function removeEscalationUser(userId: string) {
 
                 <div class="flex items-center justify-between py-2">
                   <div>
-                    <p class="font-medium">Assign to Same Agent</p>
-                    <p class="text-sm text-muted-foreground">Auto-assign transfers to the contact's existing agent</p>
+                    <p class="font-medium">{{ $t('chatbotSettings.assignSameAgent') }}</p>
+                    <p class="text-sm text-muted-foreground">{{ $t('chatbotSettings.assignSameAgentDesc') }}</p>
                   </div>
                   <Switch
                     :checked="chatbotSettings.assign_to_same_agent"
@@ -568,8 +555,8 @@ function removeEscalationUser(userId: string) {
 
                 <div class="flex items-center justify-between py-2">
                   <div>
-                    <p class="font-medium">Agents See Current Conversation Only</p>
-                    <p class="text-sm text-muted-foreground">When enabled, agents only see messages from the current session</p>
+                    <p class="font-medium">{{ $t('chatbotSettings.currentConversationOnly') }}</p>
+                    <p class="text-sm text-muted-foreground">{{ $t('chatbotSettings.currentConversationOnlyDesc') }}</p>
                   </div>
                   <Switch
                     :checked="chatbotSettings.agent_current_conversation_only"
@@ -580,7 +567,7 @@ function removeEscalationUser(userId: string) {
                 <div class="flex justify-end pt-4">
                   <Button @click="saveAgentSettings" :disabled="isSubmitting">
                     <Loader2 v-if="isSubmitting" class="mr-2 h-4 w-4 animate-spin" />
-                    Save Changes
+                    {{ $t('chatbotSettings.saveChanges') }}
                   </Button>
                 </div>
               </CardContent>
@@ -591,14 +578,14 @@ function removeEscalationUser(userId: string) {
           <TabsContent value="hours">
             <Card>
               <CardHeader>
-                <CardTitle>Business Hours</CardTitle>
-                <CardDescription>Set when the chatbot is active and configure out-of-hours behavior</CardDescription>
+                <CardTitle>{{ $t('chatbotSettings.businessHours') }}</CardTitle>
+                <CardDescription>{{ $t('chatbotSettings.businessHoursDesc') }}</CardDescription>
               </CardHeader>
               <CardContent class="space-y-4">
                 <div class="flex items-center justify-between">
                   <div>
-                    <p class="font-medium">Enable Business Hours</p>
-                    <p class="text-sm text-muted-foreground">Restrict chatbot activity to specific hours</p>
+                    <p class="font-medium">{{ $t('chatbotSettings.enableBusinessHours') }}</p>
+                    <p class="text-sm text-muted-foreground">{{ $t('chatbotSettings.enableBusinessHoursDesc') }}</p>
                   </div>
                   <Switch
                     :checked="chatbotSettings.business_hours_enabled"
@@ -631,7 +618,7 @@ function removeEscalationUser(userId: string) {
                           class="w-28"
                           :disabled="!hour.enabled"
                         />
-                        <span class="text-muted-foreground">to</span>
+                        <span class="text-muted-foreground">{{ $t('chatbotSettings.to') }}</span>
                         <Input
                           v-model="hour.end_time"
                           type="time"
@@ -645,18 +632,18 @@ function removeEscalationUser(userId: string) {
                   <Separator />
 
                   <div class="space-y-2">
-                    <Label>Out of Hours Message</Label>
+                    <Label>{{ $t('chatbotSettings.outOfHoursMessage') }}</Label>
                     <Textarea
                       v-model="chatbotSettings.out_of_hours_message"
-                      placeholder="Sorry, we're currently closed. We'll get back to you soon!"
+                      :placeholder="$t('chatbotSettings.outOfHoursPlaceholder') + '...'"
                       :rows="2"
                     />
                   </div>
 
                   <div class="flex items-center justify-between py-2">
                     <div>
-                      <p class="font-medium">Allow Automated Responses Outside Hours</p>
-                      <p class="text-sm text-muted-foreground">Continue processing flows, keywords, and AI outside business hours</p>
+                      <p class="font-medium">{{ $t('chatbotSettings.allowAutomatedOutsideHours') }}</p>
+                      <p class="text-sm text-muted-foreground">{{ $t('chatbotSettings.allowAutomatedOutsideHoursDesc') }}</p>
                     </div>
                     <Switch
                       :checked="chatbotSettings.allow_automated_outside_hours"
@@ -668,7 +655,7 @@ function removeEscalationUser(userId: string) {
                 <div class="flex justify-end pt-2">
                   <Button @click="saveBusinessHoursSettings" :disabled="isSubmitting">
                     <Loader2 v-if="isSubmitting" class="mr-2 h-4 w-4 animate-spin" />
-                    Save Changes
+                    {{ $t('chatbotSettings.saveChanges') }}
                   </Button>
                 </div>
               </CardContent>
@@ -679,14 +666,14 @@ function removeEscalationUser(userId: string) {
           <TabsContent value="sla">
             <Card>
               <CardHeader>
-                <CardTitle>SLA Settings</CardTitle>
-                <CardDescription>Configure Service Level Agreements for agent transfers</CardDescription>
+                <CardTitle>{{ $t('chatbotSettings.slaSettings') }}</CardTitle>
+                <CardDescription>{{ $t('chatbotSettings.slaSettingsDesc') }}</CardDescription>
               </CardHeader>
               <CardContent class="space-y-4">
                 <div class="flex items-center justify-between">
                   <div>
-                    <p class="font-medium">Enable SLA Tracking</p>
-                    <p class="text-sm text-muted-foreground">Track response times and escalate overdue transfers</p>
+                    <p class="font-medium">{{ $t('chatbotSettings.enableSlaTracking') }}</p>
+                    <p class="text-sm text-muted-foreground">{{ $t('chatbotSettings.enableSlaTrackingDesc') }}</p>
                   </div>
                   <Switch
                     :checked="isSLAEnabled"
@@ -699,44 +686,44 @@ function removeEscalationUser(userId: string) {
 
                   <div class="grid grid-cols-2 gap-4">
                     <div class="space-y-2">
-                      <Label>Response Time (minutes)</Label>
+                      <Label>{{ $t('chatbotSettings.responseTime') }}</Label>
                       <Input v-model.number="slaSettings.sla_response_minutes" type="number" min="1" max="1440" />
-                      <p class="text-xs text-muted-foreground">Time for agent to pick up</p>
+                      <p class="text-xs text-muted-foreground">{{ $t('chatbotSettings.responseTimeHint') }}</p>
                     </div>
                     <div class="space-y-2">
-                      <Label>Escalation Time (minutes)</Label>
+                      <Label>{{ $t('chatbotSettings.escalationTime') }}</Label>
                       <Input v-model.number="slaSettings.sla_escalation_minutes" type="number" min="1" max="1440" />
-                      <p class="text-xs text-muted-foreground">Time before escalating</p>
+                      <p class="text-xs text-muted-foreground">{{ $t('chatbotSettings.escalationTimeHint') }}</p>
                     </div>
                   </div>
 
                   <div class="grid grid-cols-2 gap-4">
                     <div class="space-y-2">
-                      <Label>Resolution Time (minutes)</Label>
+                      <Label>{{ $t('chatbotSettings.resolutionTime') }}</Label>
                       <Input v-model.number="slaSettings.sla_resolution_minutes" type="number" min="1" max="10080" />
-                      <p class="text-xs text-muted-foreground">Expected resolution time</p>
+                      <p class="text-xs text-muted-foreground">{{ $t('chatbotSettings.resolutionTimeHint') }}</p>
                     </div>
                     <div class="space-y-2">
-                      <Label>Auto-Close (hours)</Label>
+                      <Label>{{ $t('chatbotSettings.autoCloseHours') }}</Label>
                       <Input v-model.number="slaSettings.sla_auto_close_hours" type="number" min="1" max="168" />
-                      <p class="text-xs text-muted-foreground">Auto-close inactive chats</p>
+                      <p class="text-xs text-muted-foreground">{{ $t('chatbotSettings.autoCloseHoursHint') }}</p>
                     </div>
                   </div>
 
                   <div class="space-y-2">
-                    <Label>Auto-Close Message</Label>
+                    <Label>{{ $t('chatbotSettings.autoCloseMessage') }}</Label>
                     <Textarea
                       v-model="slaSettings.sla_auto_close_message"
-                      placeholder="Your chat has been closed due to inactivity."
+                      :placeholder="$t('chatbotSettings.autoClosePlaceholder') + '...'"
                       :rows="2"
                     />
                   </div>
 
                   <div class="space-y-2">
-                    <Label>Customer Warning Message</Label>
+                    <Label>{{ $t('chatbotSettings.customerWarningMessage') }}</Label>
                     <Textarea
                       v-model="slaSettings.sla_warning_message"
-                      placeholder="We're experiencing higher than usual wait times."
+                      :placeholder="$t('chatbotSettings.customerWarningPlaceholder') + '...'"
                       :rows="2"
                     />
                   </div>
@@ -746,21 +733,21 @@ function removeEscalationUser(userId: string) {
                   <div class="space-y-3">
                     <div class="flex items-center justify-between">
                       <div>
-                        <Label>Escalation Notify Contacts</Label>
-                        <p class="text-xs text-muted-foreground">Users to notify on escalation</p>
+                        <Label>{{ $t('chatbotSettings.escalationNotifyContacts') }}</Label>
+                        <p class="text-xs text-muted-foreground">{{ $t('chatbotSettings.escalationNotifyHint') }}</p>
                       </div>
                       <Popover v-model:open="escalationComboboxOpen">
                         <PopoverTrigger as-child>
                           <Button variant="outline" size="sm" class="gap-2" :disabled="unselectedUsers.length === 0">
                             <UserPlus class="h-4 w-4" />
-                            Add User
+                            {{ $t('chatbotSettings.addUser') }}
                           </Button>
                         </PopoverTrigger>
                         <PopoverContent class="w-[250px] p-0" align="end">
                           <Command>
-                            <CommandInput placeholder="Search users..." />
+                            <CommandInput :placeholder="$t('chatbotSettings.searchUsers') + '...'" />
                             <CommandList>
-                              <CommandEmpty>No users found.</CommandEmpty>
+                              <CommandEmpty>{{ $t('chatbotSettings.noUsersFound') }}</CommandEmpty>
                               <CommandGroup>
                                 <CommandItem
                                   v-for="user in unselectedUsers"
@@ -790,7 +777,7 @@ function removeEscalationUser(userId: string) {
                         </button>
                       </div>
                     </div>
-                    <p v-else class="text-sm text-muted-foreground italic">No users selected</p>
+                    <p v-else class="text-sm text-muted-foreground italic">{{ $t('chatbotSettings.noUsersSelected') }}</p>
                   </div>
                 </div>
 
@@ -800,8 +787,8 @@ function removeEscalationUser(userId: string) {
                 <div class="space-y-4">
                   <div class="flex items-center justify-between">
                     <div>
-                      <p class="font-medium">Client Inactivity Reminders</p>
-                      <p class="text-sm text-muted-foreground">Send reminders to clients who don't respond to chatbot messages</p>
+                      <p class="font-medium">{{ $t('chatbotSettings.clientInactivityReminders') }}</p>
+                      <p class="text-sm text-muted-foreground">{{ $t('chatbotSettings.clientInactivityRemindersDesc') }}</p>
                     </div>
                     <Switch
                       :checked="isClientReminderEnabled"
@@ -812,31 +799,31 @@ function removeEscalationUser(userId: string) {
                   <div v-if="isClientReminderEnabled" class="space-y-4 pt-2">
                     <div class="grid grid-cols-2 gap-4">
                       <div class="space-y-2">
-                        <Label>Reminder After (minutes)</Label>
+                        <Label>{{ $t('chatbotSettings.reminderAfter') }}</Label>
                         <Input v-model.number="slaSettings.client_reminder_minutes" type="number" min="1" max="1440" />
-                        <p class="text-xs text-muted-foreground">Time before sending reminder</p>
+                        <p class="text-xs text-muted-foreground">{{ $t('chatbotSettings.reminderAfterHint') }}</p>
                       </div>
                       <div class="space-y-2">
-                        <Label>Auto-Close After (minutes)</Label>
+                        <Label>{{ $t('chatbotSettings.autoCloseAfter') }}</Label>
                         <Input v-model.number="slaSettings.client_auto_close_minutes" type="number" min="1" max="1440" />
-                        <p class="text-xs text-muted-foreground">Time before closing session</p>
+                        <p class="text-xs text-muted-foreground">{{ $t('chatbotSettings.autoCloseAfterHint') }}</p>
                       </div>
                     </div>
 
                     <div class="space-y-2">
-                      <Label>Reminder Message</Label>
+                      <Label>{{ $t('chatbotSettings.reminderMessage') }}</Label>
                       <Textarea
                         v-model="slaSettings.client_reminder_message"
-                        placeholder="Hi! We noticed you haven't replied. Is there anything else we can help you with?"
+                        :placeholder="$t('chatbotSettings.reminderPlaceholder') + '...'"
                         :rows="2"
                       />
                     </div>
 
                     <div class="space-y-2">
-                      <Label>Auto-Close Message</Label>
+                      <Label>{{ $t('chatbotSettings.clientAutoCloseMessage') }}</Label>
                       <Textarea
                         v-model="slaSettings.client_auto_close_message"
-                        placeholder="This conversation has been closed due to inactivity. Feel free to message us again!"
+                        :placeholder="$t('chatbotSettings.clientAutoClosePlaceholder') + '...'"
                         :rows="2"
                       />
                     </div>
@@ -846,7 +833,7 @@ function removeEscalationUser(userId: string) {
                 <div class="flex justify-end pt-2">
                   <Button @click="saveSLASettings" :disabled="isSubmitting">
                     <Loader2 v-if="isSubmitting" class="mr-2 h-4 w-4 animate-spin" />
-                    Save Changes
+                    {{ $t('chatbotSettings.saveChanges') }}
                   </Button>
                 </div>
               </CardContent>
@@ -857,14 +844,14 @@ function removeEscalationUser(userId: string) {
           <TabsContent value="ai">
             <Card>
               <CardHeader>
-                <CardTitle>AI Settings</CardTitle>
-                <CardDescription>Configure AI-powered responses for your chatbot</CardDescription>
+                <CardTitle>{{ $t('chatbotSettings.aiSettings') }}</CardTitle>
+                <CardDescription>{{ $t('chatbotSettings.aiSettingsDesc') }}</CardDescription>
               </CardHeader>
               <CardContent class="space-y-4">
                 <div class="flex items-center justify-between">
                   <div>
-                    <p class="font-medium">Enable AI Responses</p>
-                    <p class="text-sm text-muted-foreground">Use AI to generate responses when no flow matches</p>
+                    <p class="font-medium">{{ $t('chatbotSettings.enableAiResponses') }}</p>
+                    <p class="text-sm text-muted-foreground">{{ $t('chatbotSettings.enableAiResponsesDesc') }}</p>
                   </div>
                   <Switch
                     :checked="isAIEnabled"
@@ -877,10 +864,10 @@ function removeEscalationUser(userId: string) {
 
                   <div class="grid grid-cols-2 gap-4">
                     <div class="space-y-2">
-                      <Label>AI Provider</Label>
+                      <Label>{{ $t('chatbotSettings.aiProvider') }}</Label>
                       <Select v-model="aiSettings.ai_provider">
                         <SelectTrigger>
-                          <SelectValue placeholder="Select provider..." />
+                          <SelectValue :placeholder="$t('chatbotSettings.selectProvider') + '...'" />
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem v-for="provider in aiProviders" :key="provider.value" :value="provider.value">
@@ -890,10 +877,10 @@ function removeEscalationUser(userId: string) {
                       </Select>
                     </div>
                     <div class="space-y-2">
-                      <Label>Model</Label>
+                      <Label>{{ $t('chatbotSettings.model') }}</Label>
                       <Select v-model="aiSettings.ai_model" :disabled="!aiSettings.ai_provider">
                         <SelectTrigger>
-                          <SelectValue placeholder="Select model..." />
+                          <SelectValue :placeholder="$t('chatbotSettings.selectModel') + '...'" />
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem v-for="model in availableModels" :key="model" :value="model">
@@ -905,25 +892,25 @@ function removeEscalationUser(userId: string) {
                   </div>
 
                   <div class="space-y-2">
-                    <Label>API Key</Label>
+                    <Label>{{ $t('chatbotSettings.apiKey') }}</Label>
                     <Input
                       v-model="aiSettings.ai_api_key"
                       type="password"
-                      placeholder="Enter API key (leave empty to keep existing)"
+                      :placeholder="$t('chatbotSettings.apiKeyPlaceholder') + '...'"
                     />
-                    <p class="text-xs text-muted-foreground">Your API key is encrypted and stored securely</p>
+                    <p class="text-xs text-muted-foreground">{{ $t('chatbotSettings.apiKeyHint') }}</p>
                   </div>
 
                   <div class="space-y-2">
-                    <Label>Max Tokens</Label>
+                    <Label>{{ $t('chatbotSettings.maxTokens') }}</Label>
                     <Input v-model.number="aiSettings.ai_max_tokens" type="number" min="100" max="4000" class="w-32" />
                   </div>
 
                   <div class="space-y-2">
-                    <Label>System Prompt (optional)</Label>
+                    <Label>{{ $t('chatbotSettings.systemPrompt') }}</Label>
                     <Textarea
                       v-model="aiSettings.ai_system_prompt"
-                      placeholder="You are a helpful customer service assistant..."
+                      :placeholder="$t('chatbotSettings.systemPromptPlaceholder') + '...'"
                       :rows="3"
                     />
                   </div>
@@ -932,7 +919,7 @@ function removeEscalationUser(userId: string) {
                 <div class="flex justify-end pt-2">
                   <Button @click="saveAISettings" :disabled="isSubmitting">
                     <Loader2 v-if="isSubmitting" class="mr-2 h-4 w-4 animate-spin" />
-                    Save Changes
+                    {{ $t('chatbotSettings.saveChanges') }}
                   </Button>
                 </div>
               </CardContent>

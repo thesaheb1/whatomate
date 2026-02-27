@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -21,7 +21,6 @@ import {
   GripVertical,
   Type,
   TextCursorInput,
-  ListOrdered,
   CircleDot,
   CheckSquare,
   Calendar,
@@ -371,7 +370,7 @@ defineExpose({
             :key="screen.id"
             :class="[
               'flex items-center gap-2 p-2 rounded-md cursor-pointer text-sm',
-              selectedScreenIndex === index ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'
+              selectedScreenIndex === index ? 'bg-primary text-primary-foreground light:bg-primary light:text-primary-foreground' : 'hover:bg-muted'
             ]"
             @click="selectScreen(index)"
           >

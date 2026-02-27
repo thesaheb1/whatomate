@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AvatarImage as AvatarImagePrimitive } from 'radix-vue'
+import { AvatarImage as AvatarImagePrimitive } from 'reka-ui'
 import { cn } from '@/lib/utils'
 
 const props = defineProps<{
@@ -11,8 +11,9 @@ const props = defineProps<{
 
 <template>
   <AvatarImagePrimitive
+    v-if="src"
     :src="src"
-    :alt="alt"
+    :alt="alt || ''"
     :class="cn('aspect-square h-full w-full', props.class)"
   />
 </template>

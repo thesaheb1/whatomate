@@ -41,14 +41,17 @@ type FlowResponse struct {
 
 // ListFlows returns all flows for the organization
 func (a *App) ListFlows(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
+	pg := parsePagination(r)
+
 	// Optional filters
 	accountName := string(r.RequestCtx.QueryArgs().Peek("account"))
 	status := string(r.RequestCtx.QueryArgs().Peek("status"))
+	search := string(r.RequestCtx.QueryArgs().Peek("search"))
 
 	query := a.DB.Where("organization_id = ?", orgID)
 
@@ -58,9 +61,18 @@ func (a *App) ListFlows(r *fastglue.Request) error {
 	if status != "" {
 		query = query.Where("status = ?", status)
 	}
+	if search != "" {
+		searchPattern := "%" + search + "%"
+		// Search by flow name (case-insensitive)
+		query = query.Where("name ILIKE ?", searchPattern)
+	}
+
+	var total int64
+	query.Model(&models.WhatsAppFlow{}).Count(&total)
 
 	var flows []models.WhatsAppFlow
-	if err := query.Order("created_at DESC").Find(&flows).Error; err != nil {
+	if err := pg.Apply(query.Order("created_at DESC")).
+		Find(&flows).Error; err != nil {
 		a.Log.Error("Failed to list flows", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to list flows", nil, "")
 	}
@@ -70,21 +82,24 @@ func (a *App) ListFlows(r *fastglue.Request) error {
 		response[i] = flowToResponse(f)
 	}
 
-	return r.SendEnvelope(map[string]interface{}{
+	return r.SendEnvelope(map[string]any{
 		"flows": response,
+		"total": total,
+		"page":  pg.Page,
+		"limit": pg.Limit,
 	})
 }
 
 // CreateFlow creates a new WhatsApp flow
 func (a *App) CreateFlow(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
 	var req FlowRequest
-	if err := r.Decode(&req, "json"); err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid request body", nil, "")
+	if err := a.decodeRequest(r, &req); err != nil {
+		return nil
 	}
 
 	// Validate required fields
@@ -96,8 +111,7 @@ func (a *App) CreateFlow(r *fastglue.Request) error {
 	}
 
 	// Verify account exists and belongs to org
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("organization_id = ? AND name = ?", orgID, req.WhatsAppAccount).First(&account).Error; err != nil {
+	if _, err := a.resolveWhatsAppAccount(orgID, req.WhatsAppAccount); err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "WhatsApp account not found", nil, "")
 	}
 
@@ -132,48 +146,46 @@ func (a *App) CreateFlow(r *fastglue.Request) error {
 
 // GetFlow returns a single flow by ID
 func (a *App) GetFlow(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr := r.RequestCtx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "flow")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid flow ID", nil, "")
+		return nil
 	}
 
-	var flow models.WhatsAppFlow
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&flow).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Flow not found", nil, "")
+	flow, err := findByIDAndOrg[models.WhatsAppFlow](a.DB, r, id, orgID, "Flow")
+	if err != nil {
+		return nil
 	}
 
 	return r.SendEnvelope(map[string]interface{}{
-		"flow": flowToResponse(flow),
+		"flow": flowToResponse(*flow),
 	})
 }
 
 // UpdateFlow updates an existing flow
 func (a *App) UpdateFlow(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr := r.RequestCtx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "flow")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid flow ID", nil, "")
+		return nil
 	}
 
-	var flow models.WhatsAppFlow
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&flow).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Flow not found", nil, "")
+	flow, err := findByIDAndOrg[models.WhatsAppFlow](a.DB, r, id, orgID, "Flow")
+	if err != nil {
+		return nil
 	}
 
 	var req FlowRequest
-	if err := r.Decode(&req, "json"); err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid request body", nil, "")
+	if err := a.decodeRequest(r, &req); err != nil {
+		return nil
 	}
 
 	// Update fields
@@ -197,42 +209,41 @@ func (a *App) UpdateFlow(r *fastglue.Request) error {
 	if len(updates) > 0 {
 		// Mark as having local changes that need to be synced to Meta
 		updates["has_local_changes"] = true
-		if err := a.DB.Model(&flow).Updates(updates).Error; err != nil {
+		if err := a.DB.Model(flow).Updates(updates).Error; err != nil {
 			a.Log.Error("Failed to update flow", "error", err, "flow_id", id)
 			return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update flow", nil, "")
 		}
 	}
 
 	// Reload flow
-	a.DB.First(&flow, id)
+	a.DB.First(flow, id)
 
 	a.Log.Info("Flow updated", "flow_id", flow.ID)
 
 	return r.SendEnvelope(map[string]interface{}{
-		"flow": flowToResponse(flow),
+		"flow": flowToResponse(*flow),
 	})
 }
 
 // DeleteFlow deletes a flow
 func (a *App) DeleteFlow(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr := r.RequestCtx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "flow")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid flow ID", nil, "")
+		return nil
 	}
 
-	var flow models.WhatsAppFlow
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&flow).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Flow not found", nil, "")
+	flow, err := findByIDAndOrg[models.WhatsAppFlow](a.DB, r, id, orgID, "Flow")
+	if err != nil {
+		return nil
 	}
 
 	// Delete the flow (soft delete)
-	if err := a.DB.Delete(&flow).Error; err != nil {
+	if err := a.DB.Delete(flow).Error; err != nil {
 		a.Log.Error("Failed to delete flow", "error", err, "flow_id", id)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to delete flow", nil, "")
 	}
@@ -246,20 +257,19 @@ func (a *App) DeleteFlow(r *fastglue.Request) error {
 
 // SaveFlowToMeta saves/updates a flow to Meta (keeps it in DRAFT status on Meta)
 func (a *App) SaveFlowToMeta(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr := r.RequestCtx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "flow")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid flow ID", nil, "")
+		return nil
 	}
 
-	var flow models.WhatsAppFlow
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&flow).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Flow not found", nil, "")
+	flow, err := findByIDAndOrg[models.WhatsAppFlow](a.DB, r, id, orgID, "Flow")
+	if err != nil {
+		return nil
 	}
 
 	// Deprecated flows cannot be updated
@@ -268,14 +278,14 @@ func (a *App) SaveFlowToMeta(r *fastglue.Request) error {
 	}
 
 	// Get the WhatsApp account
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("organization_id = ? AND name = ?", orgID, flow.WhatsAppAccount).First(&account).Error; err != nil {
+	account, err := a.resolveWhatsAppAccount(orgID, flow.WhatsAppAccount)
+	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "WhatsApp account not found", nil, "")
 	}
 
 	// Create WhatsApp API client
 	waClient := whatsapp.New(a.Log)
-	waAccount := a.toWhatsAppAccount(&account)
+	waAccount := a.toWhatsAppAccount(account)
 
 	a.Log.Info("SaveFlowToMeta: Account details",
 		"account_name", account.Name,
@@ -299,7 +309,7 @@ func (a *App) SaveFlowToMeta(r *fastglue.Request) error {
 		metaFlowID, err = waClient.CreateFlow(ctx, waAccount, flow.Name, categories)
 		if err != nil {
 			a.Log.Error("Failed to create flow in Meta", "error", err, "flow_id", id, "business_id", account.BusinessID)
-			return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create flow in Meta: "+err.Error(), nil, "")
+			return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create flow in Meta", nil, "")
 		}
 	} else {
 		metaFlowID = flow.MetaFlowID
@@ -323,16 +333,16 @@ func (a *App) SaveFlowToMeta(r *fastglue.Request) error {
 		if err := waClient.UpdateFlowJSON(ctx, waAccount, metaFlowID, flowJSON); err != nil {
 			a.Log.Error("Failed to update flow JSON in Meta", "error", err, "flow_id", id, "meta_flow_id", metaFlowID)
 			// Save the meta flow ID even if JSON update fails
-			a.DB.Model(&flow).Updates(map[string]interface{}{
+			a.DB.Model(flow).Updates(map[string]interface{}{
 				"meta_flow_id": metaFlowID,
 			})
-			return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update flow JSON: "+err.Error(), nil, "")
+			return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update flow JSON", nil, "")
 		}
 	}
 
 	// Update local database with meta flow ID and set status to DRAFT
 	// (updating on Meta creates a new draft version that needs to be published)
-	if err := a.DB.Model(&flow).Updates(map[string]interface{}{
+	if err := a.DB.Model(flow).Updates(map[string]interface{}{
 		"meta_flow_id":      metaFlowID,
 		"status":            "DRAFT",
 		"has_local_changes": false,
@@ -342,32 +352,31 @@ func (a *App) SaveFlowToMeta(r *fastglue.Request) error {
 	}
 
 	// Reload flow
-	a.DB.First(&flow, id)
+	a.DB.First(flow, id)
 
 	a.Log.Info("Flow saved to Meta", "flow_id", flow.ID, "meta_flow_id", metaFlowID)
 
 	return r.SendEnvelope(map[string]interface{}{
-		"flow":    flowToResponse(flow),
+		"flow":    flowToResponse(*flow),
 		"message": "Flow saved to Meta successfully",
 	})
 }
 
 // PublishFlow publishes a flow to Meta
 func (a *App) PublishFlow(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr := r.RequestCtx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "flow")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid flow ID", nil, "")
+		return nil
 	}
 
-	var flow models.WhatsAppFlow
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&flow).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Flow not found", nil, "")
+	flow, err := findByIDAndOrg[models.WhatsAppFlow](a.DB, r, id, orgID, "Flow")
+	if err != nil {
+		return nil
 	}
 
 	// Only DRAFT flows can be published
@@ -381,21 +390,21 @@ func (a *App) PublishFlow(r *fastglue.Request) error {
 	}
 
 	// Get the WhatsApp account
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("organization_id = ? AND name = ?", orgID, flow.WhatsAppAccount).First(&account).Error; err != nil {
+	account, err := a.resolveWhatsAppAccount(orgID, flow.WhatsAppAccount)
+	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "WhatsApp account not found", nil, "")
 	}
 
 	// Create WhatsApp API client
 	waClient := whatsapp.New(a.Log)
-	waAccount := a.toWhatsAppAccount(&account)
+	waAccount := a.toWhatsAppAccount(account)
 
 	ctx := context.Background()
 
 	// Publish the flow
 	if err := waClient.PublishFlow(ctx, waAccount, flow.MetaFlowID); err != nil {
 		a.Log.Error("Failed to publish flow in Meta", "error", err, "flow_id", id, "meta_flow_id", flow.MetaFlowID)
-		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to publish flow: "+err.Error(), nil, "")
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to publish flow", nil, "")
 	}
 
 	// Get the flow details including preview URL
@@ -406,7 +415,7 @@ func (a *App) PublishFlow(r *fastglue.Request) error {
 	}
 
 	// Update local database
-	if err := a.DB.Model(&flow).Updates(map[string]interface{}{
+	if err := a.DB.Model(flow).Updates(map[string]interface{}{
 		"status":      "PUBLISHED",
 		"preview_url": previewURL,
 	}).Error; err != nil {
@@ -415,32 +424,31 @@ func (a *App) PublishFlow(r *fastglue.Request) error {
 	}
 
 	// Reload flow
-	a.DB.First(&flow, id)
+	a.DB.First(flow, id)
 
 	a.Log.Info("Flow published to Meta", "flow_id", flow.ID, "meta_flow_id", flow.MetaFlowID)
 
 	return r.SendEnvelope(map[string]interface{}{
-		"flow":    flowToResponse(flow),
+		"flow":    flowToResponse(*flow),
 		"message": "Flow published successfully",
 	})
 }
 
 // DeprecateFlow deprecates a published flow
 func (a *App) DeprecateFlow(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr := r.RequestCtx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "flow")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid flow ID", nil, "")
+		return nil
 	}
 
-	var flow models.WhatsAppFlow
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&flow).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Flow not found", nil, "")
+	flow, err := findByIDAndOrg[models.WhatsAppFlow](a.DB, r, id, orgID, "Flow")
+	if err != nil {
+		return nil
 	}
 
 	// Only PUBLISHED flows can be deprecated
@@ -451,22 +459,22 @@ func (a *App) DeprecateFlow(r *fastglue.Request) error {
 	// Call Meta API to deprecate the flow if we have a Meta flow ID
 	if flow.MetaFlowID != "" {
 		// Get the WhatsApp account
-		var account models.WhatsAppAccount
-		if err := a.DB.Where("organization_id = ? AND name = ?", orgID, flow.WhatsAppAccount).First(&account).Error; err != nil {
+		account, err := a.resolveWhatsAppAccount(orgID, flow.WhatsAppAccount)
+		if err != nil {
 			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "WhatsApp account not found", nil, "")
 		}
 
 		waClient := whatsapp.New(a.Log)
-		waAccount := a.toWhatsAppAccount(&account)
+		waAccount := a.toWhatsAppAccount(account)
 
 		ctx := context.Background()
 		if err := waClient.DeprecateFlow(ctx, waAccount, flow.MetaFlowID); err != nil {
 			a.Log.Error("Failed to deprecate flow in Meta", "error", err, "flow_id", id, "meta_flow_id", flow.MetaFlowID)
-			return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to deprecate flow in Meta: "+err.Error(), nil, "")
+			return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to deprecate flow in Meta", nil, "")
 		}
 	}
 
-	if err := a.DB.Model(&flow).Updates(map[string]interface{}{
+	if err := a.DB.Model(flow).Updates(map[string]interface{}{
 		"status": "DEPRECATED",
 	}).Error; err != nil {
 		a.Log.Error("Failed to deprecate flow", "error", err, "flow_id", id)
@@ -474,12 +482,12 @@ func (a *App) DeprecateFlow(r *fastglue.Request) error {
 	}
 
 	// Reload flow
-	a.DB.First(&flow, id)
+	a.DB.First(flow, id)
 
 	a.Log.Info("Flow deprecated", "flow_id", flow.ID)
 
 	return r.SendEnvelope(map[string]interface{}{
-		"flow":    flowToResponse(flow),
+		"flow":    flowToResponse(*flow),
 		"message": "Flow deprecated successfully",
 	})
 }
@@ -487,20 +495,19 @@ func (a *App) DeprecateFlow(r *fastglue.Request) error {
 // DuplicateFlow creates a copy of an existing flow as a new DRAFT
 // This is useful for editing published flows - duplicate, edit, then publish the new one
 func (a *App) DuplicateFlow(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr := r.RequestCtx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "flow")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid flow ID", nil, "")
+		return nil
 	}
 
-	var flow models.WhatsAppFlow
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&flow).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Flow not found", nil, "")
+	flow, err := findByIDAndOrg[models.WhatsAppFlow](a.DB, r, id, orgID, "Flow")
+	if err != nil {
+		return nil
 	}
 
 	// Create a duplicate with a new name
@@ -531,7 +538,7 @@ func (a *App) DuplicateFlow(r *fastglue.Request) error {
 
 // SyncFlows syncs flows from Meta for a specific WhatsApp account
 func (a *App) SyncFlows(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
@@ -540,8 +547,8 @@ func (a *App) SyncFlows(r *fastglue.Request) error {
 	var req struct {
 		WhatsAppAccount string `json:"whatsapp_account"`
 	}
-	if err := r.Decode(&req, "json"); err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid request body", nil, "")
+	if err := a.decodeRequest(r, &req); err != nil {
+		return nil
 	}
 
 	if req.WhatsAppAccount == "" {
@@ -549,14 +556,14 @@ func (a *App) SyncFlows(r *fastglue.Request) error {
 	}
 
 	// Get the WhatsApp account
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("organization_id = ? AND name = ?", orgID, req.WhatsAppAccount).First(&account).Error; err != nil {
+	account, err := a.resolveWhatsAppAccount(orgID, req.WhatsAppAccount)
+	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "WhatsApp account not found", nil, "")
 	}
 
 	// Create WhatsApp API client
 	waClient := whatsapp.New(a.Log)
-	waAccount := a.toWhatsAppAccount(&account)
+	waAccount := a.toWhatsAppAccount(account)
 
 	ctx := context.Background()
 
@@ -564,7 +571,7 @@ func (a *App) SyncFlows(r *fastglue.Request) error {
 	metaFlows, err := waClient.ListFlows(ctx, waAccount)
 	if err != nil {
 		a.Log.Error("Failed to fetch flows from Meta", "error", err)
-		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to fetch flows from Meta: "+err.Error(), nil, "")
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to fetch flows from Meta", nil, "")
 	}
 
 	// Sync each flow
@@ -659,7 +666,7 @@ func (a *App) SyncFlows(r *fastglue.Request) error {
 // - If multiple screens, only the last screen should have "complete" action
 func validateFlowStructure(screens []interface{}) error {
 	if len(screens) == 0 {
-		return fmt.Errorf("Flow must have at least one screen")
+		return fmt.Errorf("flow must have at least one screen")
 	}
 
 	// Find which screens have complete action
@@ -687,7 +694,7 @@ func validateFlowStructure(screens []interface{}) error {
 
 	// Check if any screen has a complete action
 	if len(screensWithComplete) == 0 {
-		return fmt.Errorf("Flow must have a Footer button with 'Complete Flow' action. Add a Footer component to your last screen and set its action to 'Complete Flow'")
+		return fmt.Errorf("flow must have a Footer button with 'Complete Flow' action: add a Footer component to your last screen and set its action to 'Complete Flow'")
 	}
 
 	// If multiple screens, complete action should only be on the last screen
@@ -911,7 +918,7 @@ func sanitizeID(id string) string {
 	// Check if ID already only contains valid characters
 	valid := true
 	for _, c := range id {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') { //nolint:staticcheck // More readable than De Morgan's law
 			valid = false
 			break
 		}
@@ -1012,7 +1019,8 @@ func sanitizeComponentsWithPayload(children []interface{}, allFieldNames []strin
 				newAction[k] = v
 			}
 
-			if actionName == "complete" {
+			switch actionName {
+			case "complete":
 				// Complete action: include all form fields from all screens
 				// - Fields from previous screens: use ${data.fieldName} (passed via data model)
 				// - Fields on current screen: use ${form.fieldName} (form input)
@@ -1027,7 +1035,7 @@ func sanitizeComponentsWithPayload(children []interface{}, allFieldNames []strin
 					}
 				}
 				newAction["payload"] = payload
-			} else if actionName == "navigate" {
+			case "navigate":
 				// Navigate action: pass current screen's form fields to next screen
 				// Use ${form.fieldName} for current screen's fields
 				if len(thisScreenFields) > 0 {

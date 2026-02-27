@@ -4,15 +4,16 @@
 
 Modern, open-source WhatsApp Business Platform. Single binary app.
 
-![Dashboard](docs/public/images/01-dashboard.png)
+![Dashboard](docs/public/images/dashboard-light.png#gh-light-mode-only)
+![Dashboard](docs/public/images/dashboard-dark.png#gh-dark-mode-only)
 
 ## Features
 
 - **Multi-tenant Architecture**
   Support multiple organizations with isolated data and configurations.
 
-- **Role-Based Access Control**
-  Three roles (Admin, Manager, Agent) with granular permissions.
+- **Granular Roles & Permissions**
+  Customizable roles with fine-grained permissions. Create custom roles, assign specific permissions per resource (users, contacts, templates, etc.), and control access at the action level (read, create, update, delete). Super admins can manage multiple organizations.
 
 - **WhatsApp Cloud API Integration**
   Connect with Meta's WhatsApp Business API for messaging.
@@ -32,14 +33,23 @@ Modern, open-source WhatsApp Business Platform. Single binary app.
 - **Canned Responses**
   Pre-defined quick replies with slash commands (`/shortcut`) and dynamic placeholders.
 
+- **Voice Calling & IVR**
+  Incoming and outgoing WhatsApp calls with IVR menus, DTMF routing, call transfers to agent teams, hold music, and call recording. See [calling docs](https://shridarpatil.github.io/whatomate/features/calling/).
+
 - **Analytics Dashboard**
   Track messages, engagement, and campaign performance.
 
 <details>
 <summary>View more screenshots</summary>
 
-![Chatbot Settings](docs/public/images/02-chatbot-settings.png)
-![Conversation Flow Builder](docs/public/images/08-conversation-flow-builder.png)
+![Dashboard](docs/public/images/dashboard-light.png#gh-light-mode-only)
+![Dashboard](docs/public/images/dashboard-dark.png#gh-dark-mode-only)
+![Chatbot](docs/public/images/chatbot-light.png#gh-light-mode-only)
+![Chatbot](docs/public/images/chatbot-dark.png#gh-dark-mode-only)
+![Agent Analytics](docs/public/images/agent-analytics-light.png#gh-light-mode-only)
+![Agent Analytics](docs/public/images/agent-analytics-dark.png#gh-dark-mode-only)
+![Conversation Flow Builder](docs/public/images/conversation-flow-light.png#gh-light-mode-only)
+![Conversation Flow Builder](docs/public/images/conversation-flow-dark.png#gh-dark-mode-only)
 ![Templates](docs/public/images/11-templates.png)
 ![Campaigns](docs/public/images/13-campaigns.png)
 
@@ -94,7 +104,7 @@ make build-prod
 ./whatomate server -migrate
 ```
 
-See [configuration docs](docs/src/content/docs/getting-started/configuration.mdx) for detailed setup options.
+See [configuration docs](https://shridarpatil.github.io/whatomate/getting-started/configuration/) for detailed setup options.
 
 ## CLI Usage
 
@@ -108,6 +118,7 @@ See [configuration docs](docs/src/content/docs/getting-started/configuration.mdx
 ## Developers
 
 The backend is written in Go ([Fastglue](https://github.com/zerodha/fastglue)) and the frontend is Vue.js 3 with shadcn-vue.
+- If you are interested in contributing, please read [CONTRIBUTING.md](./CONTRIBUTING.md) first.
 
 ```bash
 # Development setup

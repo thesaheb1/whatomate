@@ -3,14 +3,19 @@ package handlers
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"github.com/shridarpatil/whatomate/internal/calling"
 	"github.com/shridarpatil/whatomate/internal/config"
 	"github.com/shridarpatil/whatomate/internal/queue"
+	"github.com/shridarpatil/whatomate/internal/storage"
+	"github.com/shridarpatil/whatomate/internal/tts"
 	"github.com/shridarpatil/whatomate/internal/websocket"
 	"github.com/shridarpatil/whatomate/pkg/whatsapp"
+	"github.com/valyala/fasthttp"
 	"github.com/zerodha/fastglue"
 	"github.com/zerodha/logf"
 	"gorm.io/gorm"
@@ -26,6 +31,14 @@ type App struct {
 	WSHub             *websocket.Hub
 	Queue             queue.Queue
 	CampaignSubCancel context.CancelFunc
+	// HTTPClient is a shared HTTP client with connection pooling for external API calls
+	HTTPClient *http.Client
+	// CallManager handles WebRTC call sessions (nil when calling is disabled)
+	CallManager *calling.Manager
+	// TTS generates audio from text for IVR greetings (nil when not configured)
+	TTS *tts.PiperTTS
+	// S3Client for serving call recording presigned URLs (nil when not configured)
+	S3Client *storage.S3Client
 	// wg tracks background goroutines for graceful shutdown
 	wg sync.WaitGroup
 }
@@ -36,18 +49,54 @@ func (a *App) WaitForBackgroundTasks() {
 	a.wg.Wait()
 }
 
-// getOrgIDFromContext extracts organization ID from request context (set by auth middleware)
-func (a *App) getOrgIDFromContext(r *fastglue.Request) (uuid.UUID, error) {
+// getOrgID extracts organization ID from request context (set by auth middleware)
+// Super admins can override the org by passing X-Organization-ID header
+// Super admins MUST select an organization - no "all organizations" view
+func (a *App) getOrgID(r *fastglue.Request) (uuid.UUID, error) {
+	// Get user's default organization ID from JWT
+	var defaultOrgID uuid.UUID
 	orgIDVal := r.RequestCtx.UserValue("organization_id")
 	if orgIDVal == nil {
 		return uuid.Nil, errors.New("organization_id not found in context")
 	}
-	// The middleware stores uuid.UUID directly, not as string
-	orgID, ok := orgIDVal.(uuid.UUID)
-	if !ok {
+	switch v := orgIDVal.(type) {
+	case uuid.UUID:
+		defaultOrgID = v
+	case string:
+		parsed, err := uuid.Parse(v)
+		if err != nil {
+			return uuid.Nil, errors.New("organization_id is not a valid UUID")
+		}
+		defaultOrgID = parsed
+	default:
 		return uuid.Nil, errors.New("organization_id is not a valid UUID")
 	}
-	return orgID, nil
+
+	// Check for X-Organization-ID header to switch organizations
+	userID, _ := r.RequestCtx.UserValue("user_id").(uuid.UUID)
+	overrideOrgID := string(r.RequestCtx.Request.Header.Peek("X-Organization-ID"))
+	if overrideOrgID != "" {
+		parsedOrgID, err := uuid.Parse(overrideOrgID)
+		if err == nil && parsedOrgID != defaultOrgID {
+			if a.IsSuperAdmin(userID) {
+				// Super admins can access any org
+				var count int64
+				if err := a.DB.Table("organizations").Where("id = ?", parsedOrgID).Count(&count).Error; err == nil && count > 0 {
+					return parsedOrgID, nil
+				}
+			} else {
+				// Non-super-admins can switch if they have membership
+				var count int64
+				if err := a.DB.Table("user_organizations").
+					Where("user_id = ? AND organization_id = ? AND deleted_at IS NULL", userID, parsedOrgID).
+					Count(&count).Error; err == nil && count > 0 {
+					return parsedOrgID, nil
+				}
+			}
+		}
+	}
+
+	return defaultOrgID, nil
 }
 
 // HealthCheck returns server health status
@@ -127,4 +176,53 @@ func (a *App) StopCampaignStatsSubscriber() {
 	if a.CampaignSubCancel != nil {
 		a.CampaignSubCancel()
 	}
+}
+
+// getOrgAndUserID extracts both organization ID and user ID from the request context.
+// Returns an error if either is missing or invalid.
+func (a *App) getOrgAndUserID(r *fastglue.Request) (orgID, userID uuid.UUID, err error) {
+	orgID, err = a.getOrgID(r)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, err
+	}
+
+	userIDVal := r.RequestCtx.UserValue("user_id")
+	if userIDVal == nil {
+		return uuid.Nil, uuid.Nil, errors.New("user_id not found in context")
+	}
+	switch v := userIDVal.(type) {
+	case uuid.UUID:
+		userID = v
+	case string:
+		userID, err = uuid.Parse(v)
+		if err != nil {
+			return uuid.Nil, uuid.Nil, errors.New("user_id is not a valid UUID")
+		}
+	default:
+		return uuid.Nil, uuid.Nil, errors.New("user_id is not a valid UUID")
+	}
+
+	return orgID, userID, nil
+}
+
+// requirePermission checks if the user has the required permission.
+// Returns nil if permitted, otherwise sends a 403 error envelope and returns errEnvelopeSent.
+// Automatically extracts orgID from the request for org-aware permission checks.
+func (a *App) requirePermission(r *fastglue.Request, userID uuid.UUID, resource, action string) error {
+	orgID, _ := a.getOrgID(r)
+	if !a.HasPermission(userID, resource, action, orgID) {
+		_ = r.SendErrorEnvelope(fasthttp.StatusForbidden, "Insufficient permissions", nil, "")
+		return errEnvelopeSent
+	}
+	return nil
+}
+
+// decodeRequest decodes a JSON request body into the provided struct.
+// Returns nil on success, otherwise sends a 400 error envelope and returns errEnvelopeSent.
+func (a *App) decodeRequest(r *fastglue.Request, v interface{}) error {
+	if err := r.Decode(v, "json"); err != nil {
+		_ = r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid request body", nil, "")
+		return errEnvelopeSent
+	}
+	return nil
 }

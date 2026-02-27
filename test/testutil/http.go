@@ -84,17 +84,11 @@ func ParseJSONResponse(t *testing.T, req *fastglue.Request, target any) {
 	require.NoError(t, err, "failed to parse JSON response: %s", string(body))
 }
 
-// APIEnvelope represents the standard API response envelope.
+// APIEnvelope represents the standard fastglue API response envelope.
 type APIEnvelope struct {
-	Status string          `json:"status"`
-	Data   json.RawMessage `json:"data,omitempty"`
-	Error  *APIError       `json:"error,omitempty"`
-}
-
-// APIError represents an error in the API envelope.
-type APIError struct {
-	Message string `json:"message"`
-	Code    string `json:"code,omitempty"`
+	Status  string          `json:"status"`
+	Message *string         `json:"message,omitempty"`
+	Data    json.RawMessage `json:"data"`
 }
 
 // ParseEnvelopeResponse parses the response as an API envelope and returns the data.
@@ -110,6 +104,19 @@ func ParseEnvelopeResponse(t *testing.T, req *fastglue.Request, target any) {
 	}
 }
 
+// GetResponseCookie reads a Set-Cookie value from the response by name.
+func GetResponseCookie(req *fastglue.Request, name string) string {
+	var value string
+	req.RequestCtx.Response.Header.VisitAllCookie(func(key, val []byte) {
+		c := fasthttp.AcquireCookie()
+		defer fasthttp.ReleaseCookie(c)
+		if err := c.ParseBytes(val); err == nil && string(c.Key()) == name {
+			value = string(c.Value())
+		}
+	})
+	return value
+}
+
 // AssertErrorResponse asserts that the response is an error with the expected message.
 func AssertErrorResponse(t *testing.T, req *fastglue.Request, expectedStatus int, expectedMessage string) {
 	t.Helper()
@@ -120,6 +127,6 @@ func AssertErrorResponse(t *testing.T, req *fastglue.Request, expectedStatus int
 	ParseJSONResponse(t, req, &envelope)
 
 	require.Equal(t, "error", envelope.Status, "expected error status")
-	require.NotNil(t, envelope.Error, "expected error in envelope")
-	require.Contains(t, envelope.Error.Message, expectedMessage, "error message mismatch")
+	require.NotNil(t, envelope.Message, "expected message in envelope")
+	require.Contains(t, *envelope.Message, expectedMessage, "error message mismatch")
 }

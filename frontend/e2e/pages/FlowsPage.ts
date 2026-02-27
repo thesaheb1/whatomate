@@ -16,8 +16,9 @@ export class FlowsPage extends BasePage {
     this.createButton = page.getByRole('button', { name: /Create Flow/i }).first()
     this.syncButton = page.getByRole('button', { name: /Sync from Meta/i }).first()
     this.accountFilter = page.locator('button[role="combobox"]').first()
-    this.createDialog = page.locator('[role="dialog"][data-state="open"]')
-    this.editDialog = page.locator('[role="dialog"][data-state="open"]')
+    // Distinguish dialogs by their title content
+    this.createDialog = page.locator('[role="dialog"][data-state="open"]').filter({ hasText: 'Create WhatsApp Flow' })
+    this.editDialog = page.locator('[role="dialog"][data-state="open"]').filter({ hasText: 'Edit WhatsApp Flow' })
     this.alertDialog = page.locator('[role="alertdialog"]')
   }
 
@@ -38,17 +39,18 @@ export class FlowsPage extends BasePage {
 
   getEditButton(card?: Locator): Locator {
     const container = card || this.page
-    return container.locator('button').filter({ has: this.page.locator('svg.lucide-pencil') }).first()
+    // Use lucide class without svg prefix for broader compatibility
+    return container.locator('button').filter({ has: this.page.locator('.lucide-pencil') }).first()
   }
 
   getDeleteButton(card?: Locator): Locator {
     const container = card || this.page
-    return container.locator('button').filter({ has: this.page.locator('svg.lucide-trash-2') }).first()
+    return container.locator('button').filter({ has: this.page.locator('.lucide-trash-2') }).first()
   }
 
   getDuplicateButton(card?: Locator): Locator {
     const container = card || this.page
-    return container.locator('button').filter({ has: this.page.locator('svg.lucide-copy') }).first()
+    return container.locator('button').filter({ has: this.page.locator('.lucide-copy') }).first()
   }
 
   getPreviewButton(card?: Locator): Locator {
@@ -196,7 +198,7 @@ export class ChatbotFlowsPage extends BasePage {
     super(page)
     this.heading = page.getByRole('heading', { name: /Conversation Flows/i }).first()
     this.createButton = page.getByRole('button', { name: /Create Flow/i }).first()
-    this.backButton = page.locator('button').filter({ has: page.locator('svg.lucide-arrow-left') }).first()
+    this.backButton = page.locator('button').filter({ has: page.locator('.lucide-arrow-left') }).first()
     this.alertDialog = page.locator('[role="alertdialog"]')
   }
 
@@ -222,12 +224,12 @@ export class ChatbotFlowsPage extends BasePage {
 
   getEditButton(card?: Locator): Locator {
     const container = card || this.page
-    return container.locator('button').filter({ has: this.page.locator('svg.lucide-pencil') }).first()
+    return container.locator('button').filter({ has: this.page.locator('.lucide-pencil') }).first()
   }
 
   getDeleteButton(card?: Locator): Locator {
     const container = card || this.page
-    return container.locator('button').filter({ has: this.page.locator('svg.lucide-trash-2') }).first()
+    return container.locator('button').filter({ has: this.page.locator('.lucide-trash-2') }).first()
   }
 
   getToggleButton(card?: Locator): Locator {
@@ -308,5 +310,91 @@ export class ChatbotFlowsPage extends BasePage {
 
   async hasToggleButton(): Promise<boolean> {
     return this.getToggleButton().isVisible()
+  }
+}
+
+export class ChatbotFlowBuilderPage extends BasePage {
+  // Left panel
+  readonly stepsHeading: Locator
+  readonly addStepButton: Locator
+
+  // Right panel
+  readonly propertiesHeading: Locator
+
+  constructor(page: Page) {
+    super(page)
+    this.stepsHeading = page.getByRole('heading', { name: 'Steps' })
+    this.addStepButton = page.getByRole('button', { name: /^Add$/ })
+    this.propertiesHeading = page.getByRole('heading', { name: /Step Properties|Flow Settings/i })
+  }
+
+  async gotoNew() {
+    await this.page.goto('/chatbot/flows/new')
+    await this.page.waitForLoadState('networkidle')
+  }
+
+  /** Click "Add" in the steps panel to create a new step */
+  async addStep() {
+    await this.addStepButton.click()
+  }
+
+  /** Click on a step in the left panel by its index (1-based badge) */
+  async selectStep(index: number) {
+    await this.page.locator('.font-mono').filter({ hasText: String(index) }).click()
+  }
+
+  /** Click a message type button in the center preview palette */
+  async selectMessageType(type: 'Text' | 'Buttons' | 'API' | 'Flow' | 'Transfer') {
+    await this.page.getByRole('button', { name: type, exact: true }).click()
+  }
+
+  /** Get the step properties panel (right side) */
+  get propertiesPanel() {
+    return this.page.locator('div').filter({ has: this.propertiesHeading }).first()
+  }
+
+  /** Get the "Button Options" label in step properties */
+  get buttonOptionsLabel() {
+    return this.page.getByText(/Button Options/i)
+  }
+
+  /** Get the "Reply" add-button in the buttons config section */
+  get addReplyButton() {
+    return this.page.getByRole('button', { name: /^Reply$/ })
+  }
+
+  /** Get the "URL" add-button in the buttons config section */
+  get addUrlButton() {
+    return this.page.getByRole('button', { name: /^URL$/ })
+  }
+
+  /** Get the "Phone" add-button in the buttons config section */
+  get addPhoneButton() {
+    return this.page.getByRole('button', { name: /^Phone$/ })
+  }
+
+  /** Get a button title input by index (0-based) */
+  getButtonTitleInput(index: number) {
+    return this.page.getByPlaceholder(/Button Title/i).nth(index)
+  }
+
+  /** Get the message text textarea in step properties */
+  get messageTextarea() {
+    return this.page.getByPlaceholder(/Enter your message/i)
+  }
+
+  /** Get the "Go to" select for a button's conditional routing */
+  getButtonGoToSelect(index: number) {
+    return this.page.getByText(/Go to/i).nth(index)
+  }
+
+  /** Get all button config cards in step properties */
+  get buttonCards() {
+    return this.page.locator('.p-2.border.rounded-md.space-y-2')
+  }
+
+  /** Get delete button for a specific button config (0-based) */
+  getButtonDeleteButton(index: number) {
+    return this.buttonCards.nth(index).locator('button').filter({ has: this.page.locator('.text-destructive') })
   }
 }

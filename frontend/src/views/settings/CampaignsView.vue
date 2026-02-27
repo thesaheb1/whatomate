@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -7,7 +8,6 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import { Skeleton } from '@/components/ui/skeleton'
 import { Progress } from '@/components/ui/progress'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { RangeCalendar } from '@/components/ui/range-calendar'
@@ -18,7 +18,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger
 } from '@/components/ui/dialog'
 import {
   AlertDialog,
@@ -46,6 +45,8 @@ import { campaignsService, templatesService, accountsService } from '@/services/
 import { wsService } from '@/services/websocket'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { toast } from 'vue-sonner'
+import { PageHeader, DataTable, DeleteConfirmDialog, SearchInput, type Column } from '@/components/shared'
+import { getErrorMessage } from '@/lib/api-utils'
 import {
   Plus,
   Pencil,
@@ -67,15 +68,12 @@ import {
   Check,
   RefreshCw,
   CalendarIcon,
-  Image,
-  FileText,
-  Video,
-  X,
   MessageSquare
 } from 'lucide-vue-next'
 import { formatDate } from '@/lib/utils'
-import type { DateRange } from 'reka-ui'
-import { CalendarDate } from '@internationalized/date'
+import { useDebounceFn } from '@vueuse/core'
+
+const { t } = useI18n()
 
 interface Campaign {
   id: string
@@ -150,23 +148,45 @@ const isCreating = ref(false)
 const showCreateDialog = ref(false)
 const editingCampaignId = ref<string | null>(null) // null = create mode, string = edit mode
 
+const columns = computed<Column<Campaign>[]>(() => [
+  { key: 'name', label: t('campaigns.campaign'), sortable: true },
+  { key: 'status', label: t('campaigns.status'), sortable: true },
+  { key: 'stats', label: t('campaigns.progress') },
+  { key: 'created_at', label: t('campaigns.created'), sortable: true },
+  { key: 'actions', label: t('common.actions'), align: 'right' },
+])
+
+const sortKey = ref('created_at')
+const sortDirection = ref<'asc' | 'desc'>('desc')
+const searchQuery = ref('')
+
+// Pagination state
+const currentPage = ref(1)
+const totalItems = ref(0)
+const pageSize = 20
+
+function handlePageChange(page: number) {
+  currentPage.value = page
+  fetchCampaigns()
+}
+
 // Filter state
 const filterStatus = ref<string>('all')
 type TimeRangePreset = 'today' | '7days' | '30days' | 'this_month' | 'custom'
 const selectedRange = ref<TimeRangePreset>('this_month')
-const customDateRange = ref<DateRange>({ start: undefined, end: undefined })
+const customDateRange = ref<any>({ start: undefined, end: undefined })
 const isDatePickerOpen = ref(false)
 
-const statusOptions = [
-  { value: 'all', label: 'All Statuses' },
-  { value: 'draft', label: 'Draft' },
-  { value: 'queued', label: 'Queued' },
-  { value: 'processing', label: 'Processing' },
-  { value: 'completed', label: 'Completed' },
-  { value: 'failed', label: 'Failed' },
-  { value: 'cancelled', label: 'Cancelled' },
-  { value: 'paused', label: 'Paused' },
-]
+const statusOptions = computed(() => [
+  { value: 'all', label: t('campaigns.allStatuses') },
+  { value: 'draft', label: t('campaigns.draft') },
+  { value: 'queued', label: t('campaigns.queued') },
+  { value: 'processing', label: t('campaigns.processing') },
+  { value: 'completed', label: t('campaigns.completed') },
+  { value: 'failed', label: t('campaigns.failed') },
+  { value: 'cancelled', label: t('campaigns.cancelled') },
+  { value: 'paused', label: t('campaigns.paused') },
+])
 
 // Format date as YYYY-MM-DD in local timezone
 const formatDateLocal = (date: Date): string => {
@@ -244,10 +264,6 @@ const selectedTemplate = ref<Template | null>(null)
 const addRecipientsTab = ref('manual')
 
 // Media upload state
-const mediaFile = ref<File | null>(null)
-const isUploadingMedia = ref(false)
-const mediaPreviewUrl = ref<string | null>(null)
-
 // Computed: template parameter format hints
 const templateParamNames = computed(() => {
   if (!selectedTemplate.value) return []
@@ -298,83 +314,13 @@ const recipientPlaceholder = computed(() => {
     return `${p}_value`
   })
   const line1 = `+1234567890, ${exampleValues.join(', ')}`
-  const line2 = `+0987654321, ${exampleValues.map((v, i) => {
+  const line2 = `+0987654321, ${exampleValues.map((v) => {
     if (v === 'John Doe') return 'Jane Smith'
     if (v === 'ORD-123') return 'ORD-456'
     return v
   }).join(', ')}`
   return `${line1}\n${line2}`
 })
-
-// Check if selected campaign's template has media header
-const campaignTemplateHasMedia = computed(() => {
-  if (!selectedCampaign.value?.template_id) return false
-  const template = templates.value.find(t => t.id === selectedCampaign.value?.template_id)
-  return template?.header_type && template.header_type !== 'TEXT'
-})
-
-const campaignTemplateMediaType = computed(() => {
-  if (!selectedCampaign.value?.template_id) return null
-  const template = templates.value.find(t => t.id === selectedCampaign.value?.template_id)
-  return template?.header_type || null
-})
-
-// Get accepted file types based on template header type
-const acceptedMediaTypes = computed(() => {
-  const type = campaignTemplateMediaType.value
-  switch (type) {
-    case 'IMAGE': return 'image/jpeg,image/png'
-    case 'VIDEO': return 'video/mp4,video/3gpp'
-    case 'DOCUMENT': return 'application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    default: return '*/*'
-  }
-})
-
-function handleMediaFileSelect(event: Event) {
-  const input = event.target as HTMLInputElement
-  if (input.files && input.files[0]) {
-    mediaFile.value = input.files[0]
-    // Create preview URL for images
-    if (mediaFile.value.type.startsWith('image/')) {
-      mediaPreviewUrl.value = URL.createObjectURL(mediaFile.value)
-    } else {
-      mediaPreviewUrl.value = null
-    }
-  }
-}
-
-function clearMediaFile() {
-  mediaFile.value = null
-  if (mediaPreviewUrl.value) {
-    URL.revokeObjectURL(mediaPreviewUrl.value)
-    mediaPreviewUrl.value = null
-  }
-}
-
-async function uploadCampaignMedia() {
-  if (!selectedCampaign.value || !mediaFile.value) return
-
-  isUploadingMedia.value = true
-  try {
-    const response = await campaignsService.uploadMedia(selectedCampaign.value.id, mediaFile.value)
-    const result = response.data.data
-    toast.success('Media uploaded successfully')
-    // Update campaign with media ID
-    selectedCampaign.value.header_media_id = result.media_id
-    await fetchCampaigns()
-    // Update selectedCampaign with fresh data
-    const updated = campaigns.value.find(c => c.id === selectedCampaign.value?.id)
-    if (updated) {
-      selectedCampaign.value = updated
-    }
-    clearMediaFile()
-  } catch (error: any) {
-    const message = error.response?.data?.message || 'Failed to upload media'
-    toast.error(message)
-  } finally {
-    isUploadingMedia.value = false
-  }
-}
 
 // Manual input validation
 interface ManualInputValidation {
@@ -400,7 +346,7 @@ const manualInputValidation = computed((): ManualInputValidation => {
 
     // Validate phone number
     if (!phone || !phone.match(/^\+?\d{10,15}$/)) {
-      invalidLines.push({ lineNumber: i + 1, reason: 'Invalid phone number' })
+      invalidLines.push({ lineNumber: i + 1, reason: t('campaigns.invalidPhoneNumber') })
       continue
     }
 
@@ -409,7 +355,7 @@ const manualInputValidation = computed((): ManualInputValidation => {
     if (params.length > 0 && providedParams < params.length) {
       invalidLines.push({
         lineNumber: i + 1,
-        reason: `Missing parameters: needs ${params.length}, has ${providedParams}`
+        reason: t('campaigns.missingParameters', { needed: params.length, has: providedParams })
       })
     }
   }
@@ -441,7 +387,6 @@ let unsubscribeCampaignStats: (() => void) | null = null
 onMounted(async () => {
   await Promise.all([
     fetchCampaigns(),
-    fetchTemplates(),
     fetchAccounts()
   ])
 
@@ -470,16 +415,27 @@ async function fetchCampaigns() {
   isLoading.value = true
   try {
     const { from, to } = getDateRange.value
-    const params: Record<string, string> = { from, to }
+    const params: Record<string, string | number> = {
+      from,
+      to,
+      page: currentPage.value,
+      limit: pageSize
+    }
     if (filterStatus.value && filterStatus.value !== 'all') {
       params.status = filterStatus.value
     }
+    if (searchQuery.value) {
+      params.search = searchQuery.value
+    }
     const response = await campaignsService.list(params)
-    // API returns: { status: "success", data: { campaigns: [...] } }
-    campaigns.value = response.data.data?.campaigns || []
+    // API returns: { status: "success", data: { campaigns: [...], total: N } }
+    const data = response.data.data || response.data
+    campaigns.value = data.campaigns || []
+    totalItems.value = data.total ?? campaigns.value.length
   } catch (error) {
     console.error('Failed to fetch campaigns:', error)
     campaigns.value = []
+    totalItems.value = 0
   } finally {
     isLoading.value = false
   }
@@ -492,22 +448,42 @@ function applyCustomRange() {
   }
 }
 
+// Debounced search
+const debouncedSearch = useDebounceFn(() => {
+  currentPage.value = 1
+  fetchCampaigns()
+}, 300)
+
+watch(searchQuery, () => debouncedSearch())
+
 // Watch for filter changes
 watch([filterStatus, selectedRange], () => {
+  currentPage.value = 1
   if (selectedRange.value !== 'custom') {
     fetchCampaigns()
   }
 })
 
-async function fetchTemplates() {
+async function fetchTemplates(account?: string) {
   try {
-    const response = await templatesService.list()
-    templates.value = response.data.data?.templates || []
+    const response = await templatesService.list(account ? { account } : undefined)
+    const data = (response.data as any).data || response.data
+    templates.value = data.templates || []
   } catch (error) {
     console.error('Failed to fetch templates:', error)
     templates.value = []
   }
 }
+
+// Re-fetch templates when account changes
+watch(() => newCampaign.value.whatsapp_account, (account) => {
+  newCampaign.value.template_id = ''
+  if (account) {
+    fetchTemplates(account)
+  } else {
+    templates.value = []
+  }
+})
 
 async function fetchAccounts() {
   try {
@@ -521,15 +497,15 @@ async function fetchAccounts() {
 
 async function createCampaign() {
   if (!newCampaign.value.name) {
-    toast.error('Please enter a campaign name')
+    toast.error(t('campaigns.enterCampaignName'))
     return
   }
   if (!newCampaign.value.whatsapp_account) {
-    toast.error('Please select a WhatsApp account')
+    toast.error(t('campaigns.selectWhatsappAccount'))
     return
   }
   if (!newCampaign.value.template_id) {
-    toast.error('Please select a template')
+    toast.error(t('campaigns.selectTemplateRequired'))
     return
   }
 
@@ -540,13 +516,12 @@ async function createCampaign() {
       whatsapp_account: newCampaign.value.whatsapp_account,
       template_id: newCampaign.value.template_id
     })
-    toast.success('Campaign created successfully')
+    toast.success(t('common.createdSuccess', { resource: t('resources.Campaign') }))
     showCreateDialog.value = false
     resetForm()
     await fetchCampaigns()
   } catch (error: any) {
-    const message = error.response?.data?.message || 'Failed to create campaign'
-    toast.error(message)
+    toast.error(getErrorMessage(error, t('common.failedCreate', { resource: t('resources.campaign') })))
   } finally {
     isCreating.value = false
   }
@@ -578,7 +553,7 @@ function openCreateDialog() {
 
 async function saveCampaign() {
   if (!newCampaign.value.name) {
-    toast.error('Please enter a campaign name')
+    toast.error(t('campaigns.enterCampaignName'))
     return
   }
 
@@ -591,14 +566,13 @@ async function saveCampaign() {
         whatsapp_account: newCampaign.value.whatsapp_account,
         template_id: newCampaign.value.template_id
       })
-      toast.success('Campaign updated successfully')
+      toast.success(t('common.updatedSuccess', { resource: t('resources.Campaign') }))
       showCreateDialog.value = false
       editingCampaignId.value = null
       resetForm()
       await fetchCampaigns()
     } catch (error: any) {
-      const message = error.response?.data?.message || 'Failed to update campaign'
-      toast.error(message)
+      toast.error(getErrorMessage(error, t('common.failedUpdate', { resource: t('resources.campaign') })))
     } finally {
       isCreating.value = false
     }
@@ -611,22 +585,20 @@ async function saveCampaign() {
 async function startCampaign(campaign: Campaign) {
   try {
     await campaignsService.start(campaign.id)
-    toast.success('Campaign started')
+    toast.success(t('campaigns.campaignStarted'))
     await fetchCampaigns()
   } catch (error: any) {
-    const message = error.response?.data?.message || 'Failed to start campaign'
-    toast.error(message)
+    toast.error(getErrorMessage(error, t('campaigns.startFailed')))
   }
 }
 
 async function pauseCampaign(campaign: Campaign) {
   try {
     await campaignsService.pause(campaign.id)
-    toast.success('Campaign paused')
+    toast.success(t('campaigns.campaignPaused'))
     await fetchCampaigns()
   } catch (error: any) {
-    const message = error.response?.data?.message || 'Failed to pause campaign'
-    toast.error(message)
+    toast.error(getErrorMessage(error, t('campaigns.pauseFailed')))
   }
 }
 
@@ -640,13 +612,12 @@ async function confirmCancelCampaign() {
 
   try {
     await campaignsService.cancel(campaignToCancel.value.id)
-    toast.success('Campaign cancelled')
+    toast.success(t('campaigns.campaignCancelled'))
     cancelDialogOpen.value = false
     campaignToCancel.value = null
     await fetchCampaigns()
   } catch (error: any) {
-    const message = error.response?.data?.message || 'Failed to cancel campaign'
-    toast.error(message)
+    toast.error(getErrorMessage(error, t('campaigns.cancelFailed')))
   }
 }
 
@@ -654,11 +625,10 @@ async function retryFailed(campaign: Campaign) {
   try {
     const response = await campaignsService.retryFailed(campaign.id)
     const result = response.data.data
-    toast.success(`Retrying ${result?.retry_count || 0} failed message(s)`)
+    toast.success(t('campaigns.retryingFailed', { count: result?.retry_count || 0 }))
     await fetchCampaigns()
   } catch (error: any) {
-    const message = error.response?.data?.message || 'Failed to retry failed messages'
-    toast.error(message)
+    toast.error(getErrorMessage(error, t('campaigns.retryFailedError')))
   }
 }
 
@@ -672,13 +642,12 @@ async function confirmDeleteCampaign() {
 
   try {
     await campaignsService.delete(campaignToDelete.value.id)
-    toast.success('Campaign deleted')
+    toast.success(t('common.deletedSuccess', { resource: t('resources.Campaign') }))
     deleteDialogOpen.value = false
     campaignToDelete.value = null
     await fetchCampaigns()
   } catch (error: any) {
-    const message = error.response?.data?.message || 'Failed to delete campaign'
-    toast.error(message)
+    toast.error(getErrorMessage(error, t('common.failedDelete', { resource: t('resources.campaign') })))
   }
 }
 
@@ -723,36 +692,6 @@ function getProgressPercentage(campaign: Campaign): number {
   return Math.round((campaign.sent_count / campaign.total_recipients) * 100)
 }
 
-// Helper functions for media upload
-function getTemplateHeaderType(templateId: string | undefined): string | null {
-  if (!templateId) return null
-  const template = templates.value.find(t => t.id === templateId)
-  return template?.header_type || null
-}
-
-function getMediaIcon(headerType: string | null) {
-  switch (headerType) {
-    case 'IMAGE': return Image
-    case 'VIDEO': return Video
-    case 'DOCUMENT': return FileText
-    default: return FileText
-  }
-}
-
-function getAcceptedMediaTypes(headerType: string | null): string {
-  switch (headerType) {
-    case 'IMAGE': return 'image/jpeg,image/png'
-    case 'VIDEO': return 'video/mp4,video/3gpp'
-    case 'DOCUMENT': return 'application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    default: return '*/*'
-  }
-}
-
-function triggerMediaFileInput(campaignId: string) {
-  const input = window.document.querySelector(`input[data-campaign-id="${campaignId}"]`) as HTMLInputElement
-  input?.click()
-}
-
 // Cache for media blob URLs and loading states
 const mediaBlobUrls = ref<Record<string, string>>({})
 const mediaLoadingState = ref<Record<string, 'loading' | 'loaded' | 'error'>>({})
@@ -773,29 +712,15 @@ async function loadMediaPreview(campaignId: string) {
 }
 
 function getMediaPreviewUrl(campaignId: string): string {
-  return mediaBlobUrls.value[campaignId] || ''
-}
-
-function isMediaPreviewAvailable(campaignId: string): boolean {
-  // Trigger loading if not started
   if (!mediaLoadingState.value[campaignId]) {
     loadMediaPreview(campaignId)
   }
-  return mediaLoadingState.value[campaignId] === 'loaded'
-}
-
-function isMediaPreviewLoading(campaignId: string): boolean {
-  return mediaLoadingState.value[campaignId] === 'loading'
+  return mediaBlobUrls.value[campaignId] || ''
 }
 
 // Media preview dialog
 const showMediaPreviewDialog = ref(false)
 const previewingCampaign = ref<Campaign | null>(null)
-
-function openMediaPreview(campaign: Campaign) {
-  previewingCampaign.value = campaign
-  showMediaPreviewDialog.value = true
-}
 
 // Recipients functions
 const deletingRecipientId = ref<string | null>(null)
@@ -809,7 +734,7 @@ async function viewRecipients(campaign: Campaign) {
     recipients.value = response.data.data?.recipients || []
   } catch (error) {
     console.error('Failed to fetch recipients:', error)
-    toast.error('Failed to load recipients')
+    toast.error(t('common.failedLoad', { resource: t('resources.recipients') }))
     recipients.value = []
   } finally {
     isLoadingRecipients.value = false
@@ -825,7 +750,7 @@ async function deleteRecipient(recipientId: string) {
     recipients.value = recipients.value.filter(r => r.id !== recipientId)
     // Update recipient count in selectedCampaign
     selectedCampaign.value.total_recipients = recipients.value.length
-    toast.success('Recipient deleted')
+    toast.success(t('common.deletedSuccess', { resource: t('resources.Recipient') }))
     await fetchCampaigns() // Refresh campaigns list
     // Update selectedCampaign with fresh data
     const updated = campaigns.value.find(c => c.id === selectedCampaign.value?.id)
@@ -833,8 +758,7 @@ async function deleteRecipient(recipientId: string) {
       selectedCampaign.value = updated
     }
   } catch (error: any) {
-    const message = error.response?.data?.message || 'Failed to delete recipient'
-    toast.error(message)
+    toast.error(getErrorMessage(error, t('common.failedDelete', { resource: t('resources.recipient') })))
   } finally {
     deletingRecipientId.value = null
   }
@@ -845,7 +769,7 @@ async function addRecipients() {
 
   const lines = recipientsInput.value.trim().split('\n').filter(line => line.trim())
   if (lines.length === 0) {
-    toast.error('Please enter at least one phone number')
+    toast.error(t('campaigns.enterPhoneNumber'))
     return
   }
 
@@ -878,13 +802,12 @@ async function addRecipients() {
   try {
     const response = await campaignsService.addRecipients(selectedCampaign.value.id, recipientsList)
     const result = response.data.data
-    toast.success(`Added ${result?.added_count || recipientsList.length} recipients`)
+    toast.success(t('campaigns.addedRecipients', { count: result?.added_count || recipientsList.length }))
     showAddRecipientsDialog.value = false
     recipientsInput.value = ''
     await fetchCampaigns()
   } catch (error: any) {
-    const message = error.response?.data?.message || 'Failed to add recipients'
-    toast.error(message)
+    toast.error(getErrorMessage(error, t('campaigns.addRecipientsFailed')))
   } finally {
     isAddingRecipients.value = false
   }
@@ -987,7 +910,7 @@ async function validateCSV() {
         templateParamNames: [],
         csvColumns: [],
         columnMapping: [],
-        errors: ['CSV file is empty'],
+        errors: [t('campaigns.csvEmpty')],
         warnings: []
       }
       return
@@ -1012,12 +935,12 @@ async function validateCSV() {
     const globalWarnings: string[] = []
 
     if (phoneIndex === -1) {
-      globalErrors.push('Missing required column: phone_number (or phone, mobile, number)')
+      globalErrors.push(t('campaigns.missingPhoneColumn'))
     }
 
     // Warn about mixed param types
     if (hasMixedParamTypes(templateParamNames)) {
-      globalWarnings.push('Template has mixed parameter types (e.g., {{1}} and {{name}}). This may cause unexpected behavior. Use CSV columns that exactly match the parameter names.')
+      globalWarnings.push(t('campaigns.mixedParamTypes'))
     }
 
     // Map CSV columns to template parameter names
@@ -1057,7 +980,7 @@ async function validateCSV() {
       const mappedCount = paramColumnMapping.length
       if (mappedCount < templateParamNames.length) {
         const unmappedParams = templateParamNames.slice(mappedCount)
-        globalErrors.push(`Missing columns for template parameters: ${unmappedParams.join(', ')}`)
+        globalErrors.push(t('campaigns.missingParamColumns', { params: unmappedParams.join(', ') }))
       }
 
       // Warn if named params are being mapped positionally (not by column name)
@@ -1065,7 +988,7 @@ async function validateCSV() {
       if (namedParams.length > 0) {
         const positionallyMapped = namedParams.filter(n => !mappedParamNames.has(n))
         if (positionallyMapped.length > 0) {
-          globalWarnings.push(`Parameters mapped by position (not column name): ${positionallyMapped.join(', ')}. For best results, use column names that match the template parameters.`)
+          globalWarnings.push(t('campaigns.paramsMappedPositionally', { params: positionallyMapped.join(', ') }))
         }
       }
     }
@@ -1094,13 +1017,13 @@ async function validateCSV() {
 
       // Validate phone number
       if (!phone) {
-        rowErrors.push('Missing phone number')
+        rowErrors.push(t('campaigns.missingPhoneNumber'))
       } else if (!phone.match(/^\+?\d{10,15}$/)) {
-        rowErrors.push('Invalid phone number format')
+        rowErrors.push(t('campaigns.invalidPhoneFormat'))
       } else {
         // Check for duplicates
         if (seenPhones.has(cleanPhone)) {
-          rowErrors.push(`Duplicate phone number (first seen in row ${seenPhones.get(cleanPhone)! + 1})`)
+          rowErrors.push(t('campaigns.duplicatePhone', { row: seenPhones.get(cleanPhone)! + 1 }))
         } else {
           seenPhones.set(cleanPhone, rows.length)
         }
@@ -1109,7 +1032,7 @@ async function validateCSV() {
       // Validate params count if template requires params
       const providedParamCount = Object.keys(params).length
       if (templateParamNames.length > 0 && providedParamCount < templateParamNames.length) {
-        rowErrors.push(`Template requires ${templateParamNames.length} parameter(s), found ${providedParamCount}`)
+        rowErrors.push(t('campaigns.templateRequiresParamsError', { required: templateParamNames.length, found: providedParamCount }))
       }
 
       rows.push({
@@ -1146,7 +1069,7 @@ async function validateCSV() {
       templateParamNames: [],
       csvColumns: [],
       columnMapping: [],
-      errors: ['Failed to parse CSV file'],
+      errors: [t('campaigns.parseCsvFailed')],
       warnings: []
     }
   } finally {
@@ -1186,7 +1109,7 @@ async function addRecipientsFromCSV() {
 
   const validRows = csvValidation.value.rows.filter(r => r.isValid)
   if (validRows.length === 0) {
-    toast.error('No valid rows to import')
+    toast.error(t('campaigns.noValidRowsToImport'))
     return
   }
 
@@ -1208,14 +1131,13 @@ async function addRecipientsFromCSV() {
   try {
     const response = await campaignsService.addRecipients(selectedCampaign.value.id, recipientsList)
     const result = response.data.data
-    toast.success(`Added ${result?.added_count || recipientsList.length} recipients from CSV`)
+    toast.success(t('campaigns.addedFromCsv', { count: result?.added_count || recipientsList.length }))
     showAddRecipientsDialog.value = false
     csvFile.value = null
     csvValidation.value = null
     await fetchCampaigns()
   } catch (error: any) {
-    const message = error.response?.data?.message || 'Failed to add recipients'
-    toast.error(message)
+    toast.error(getErrorMessage(error, t('campaigns.addRecipientsFailed')))
   } finally {
     isAddingRecipients.value = false
   }
@@ -1223,91 +1145,44 @@ async function addRecipientsFromCSV() {
 </script>
 
 <template>
-  <div class="flex flex-col h-full">
-    <!-- Header -->
-    <header class="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div class="flex h-16 items-center px-6">
-        <Megaphone class="h-5 w-5 mr-3" />
-        <div class="flex-1">
-          <h1 class="text-xl font-semibold">Campaigns</h1>
-          <p class="text-sm text-muted-foreground">Manage bulk messaging campaigns</p>
-        </div>
-
-        <!-- Filters -->
-        <div class="flex items-center gap-2 mr-4">
-          <!-- Status Filter -->
-          <Select v-model="filterStatus">
-            <SelectTrigger class="w-[140px]">
-              <SelectValue placeholder="All Statuses" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="opt in statusOptions" :key="opt.value" :value="opt.value">
-                {{ opt.label }}
-              </SelectItem>
-            </SelectContent>
-          </Select>
-
-          <!-- Time Range Filter -->
-          <Select v-model="selectedRange">
-            <SelectTrigger class="w-[150px]">
-              <SelectValue placeholder="Select range" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="today">Today</SelectItem>
-              <SelectItem value="7days">Last 7 days</SelectItem>
-              <SelectItem value="30days">Last 30 days</SelectItem>
-              <SelectItem value="this_month">This month</SelectItem>
-              <SelectItem value="custom">Custom range</SelectItem>
-            </SelectContent>
-          </Select>
-
-          <!-- Custom Range Popover -->
-          <Popover v-if="selectedRange === 'custom'" v-model:open="isDatePickerOpen">
-            <PopoverTrigger as-child>
-              <Button variant="outline" class="w-auto">
-                <CalendarIcon class="h-4 w-4 mr-2" />
-                {{ formatDateRangeDisplay || 'Select dates' }}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent class="w-auto p-4" align="end">
-              <div class="space-y-4">
-                <RangeCalendar v-model="customDateRange" :number-of-months="2" />
-                <Button class="w-full" @click="applyCustomRange" :disabled="!customDateRange.start || !customDateRange.end">
-                  Apply Range
-                </Button>
-              </div>
-            </PopoverContent>
-          </Popover>
-        </div>
-
+  <div class="flex flex-col h-full bg-[#0a0a0b] light:bg-gray-50">
+    <PageHeader
+      :title="$t('campaigns.title')"
+      :subtitle="$t('campaigns.subtitle')"
+      :icon="Megaphone"
+      icon-gradient="bg-gradient-to-br from-rose-500 to-pink-600 shadow-rose-500/20"
+    >
+      <template #actions>
         <Button variant="outline" size="sm" @click="openCreateDialog">
           <Plus class="h-4 w-4 mr-2" />
-          Create Campaign
+          {{ $t('campaigns.createCampaign') }}
         </Button>
+      </template>
+    </PageHeader>
 
-        <Dialog v-model:open="showCreateDialog">
+    <Dialog v-model:open="showCreateDialog">
           <DialogContent class="sm:max-w-[500px]">
             <DialogHeader>
-              <DialogTitle>{{ editingCampaignId ? 'Edit Campaign' : 'Create New Campaign' }}</DialogTitle>
+              <DialogTitle>{{ editingCampaignId ? $t('campaigns.editCampaign') : $t('campaigns.createNewCampaign') }}</DialogTitle>
               <DialogDescription>
-                {{ editingCampaignId ? 'Update campaign details.' : 'Create a new bulk messaging campaign. You can add recipients after creation.' }}
+                {{ editingCampaignId ? $t('campaigns.editDescription') : $t('campaigns.createDescription') }}
               </DialogDescription>
             </DialogHeader>
             <div class="grid gap-4 py-4">
               <div class="grid gap-2">
-                <Label for="name">Campaign Name</Label>
+                <Label for="name">{{ $t('campaigns.campaignName') }}</Label>
                 <Input
                   id="name"
                   v-model="newCampaign.name"
-                  placeholder="e.g., Holiday Promotion"
+                  :placeholder="$t('campaigns.campaignNamePlaceholder')"
                   :disabled="isCreating"
                 />
               </div>
               <div class="grid gap-2">
-                <Label for="account">WhatsApp Account</Label>
+                <Label for="account">{{ $t('campaigns.whatsappAccount') }}</Label>
                 <Select v-model="newCampaign.whatsapp_account" :disabled="isCreating">
                   <SelectTrigger>
-                    <SelectValue placeholder="Select an account" />
+                    <SelectValue :placeholder="$t('campaigns.selectAccount')" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem v-for="account in accounts" :key="account.id" :value="account.name">
@@ -1316,14 +1191,14 @@ async function addRecipientsFromCSV() {
                   </SelectContent>
                 </Select>
                 <p v-if="accounts.length === 0" class="text-xs text-muted-foreground">
-                  No accounts found. Please add a WhatsApp account first.
+                  {{ $t('campaigns.noAccountsFound') }}
                 </p>
               </div>
               <div class="grid gap-2">
-                <Label for="template">Message Template</Label>
+                <Label for="template">{{ $t('campaigns.messageTemplate') }}</Label>
                 <Select v-model="newCampaign.template_id" :disabled="isCreating">
                   <SelectTrigger>
-                    <SelectValue placeholder="Select a template" />
+                    <SelectValue :placeholder="$t('campaigns.selectTemplate')" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem v-for="template in templates" :key="template.id" :value="template.id">
@@ -1332,304 +1207,205 @@ async function addRecipientsFromCSV() {
                   </SelectContent>
                 </Select>
                 <p v-if="templates.length === 0" class="text-xs text-muted-foreground">
-                  No templates found. Please create a template first.
+                  {{ $t('campaigns.noTemplatesFound') }}
                 </p>
               </div>
             </div>
             <DialogFooter>
               <Button variant="outline" size="sm" @click="showCreateDialog = false; editingCampaignId = null" :disabled="isCreating">
-                Cancel
+                {{ $t('common.cancel') }}
               </Button>
               <Button size="sm" @click="saveCampaign" :disabled="isCreating">
                 <Loader2 v-if="isCreating" class="h-4 w-4 mr-2 animate-spin" />
-                {{ editingCampaignId ? 'Save Changes' : 'Create Campaign' }}
+                {{ editingCampaignId ? $t('campaigns.saveChanges') : $t('campaigns.createCampaign') }}
               </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
-      </div>
-    </header>
 
     <!-- Campaigns List -->
     <ScrollArea class="flex-1">
-      <div class="p-6 space-y-4">
-        <!-- Loading State -->
-        <div v-if="isLoading" class="flex items-center justify-center py-12">
-          <Loader2 class="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
-
-        <!-- Campaign Cards -->
-        <Card v-for="campaign in campaigns" :key="campaign.id">
-          <CardContent class="p-6">
-            <div class="flex items-start justify-between mb-4">
-              <div class="flex items-center gap-4">
-                <div class="h-12 w-12 rounded-lg bg-orange-100 dark:bg-orange-900 flex items-center justify-center">
-                  <Megaphone class="h-6 w-6 text-orange-600 dark:text-orange-400" />
-                </div>
+      <div class="p-6">
+        <div class="max-w-6xl mx-auto">
+          <Card>
+            <CardHeader>
+              <div class="flex items-center justify-between flex-wrap gap-4">
                 <div>
-                  <h3 class="font-semibold text-lg">{{ campaign.name }}</h3>
-                  <p class="text-sm text-muted-foreground">
-                    Template: {{ campaign.template_name || 'N/A' }}
-                  </p>
+                  <CardTitle>{{ $t('campaigns.yourCampaigns') }}</CardTitle>
+                  <CardDescription>{{ $t('campaigns.yourCampaignsDesc') }}</CardDescription>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <Select v-model="filterStatus">
+                    <SelectTrigger class="w-[140px]">
+                      <SelectValue :placeholder="$t('campaigns.allStatuses')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="opt in statusOptions" :key="opt.value" :value="opt.value">
+                        {{ opt.label }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select v-model="selectedRange">
+                    <SelectTrigger class="w-[140px]">
+                      <SelectValue :placeholder="$t('campaigns.selectRange')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="today">{{ $t('campaigns.today') }}</SelectItem>
+                      <SelectItem value="7days">{{ $t('campaigns.last7Days') }}</SelectItem>
+                      <SelectItem value="30days">{{ $t('campaigns.last30Days') }}</SelectItem>
+                      <SelectItem value="this_month">{{ $t('campaigns.thisMonth') }}</SelectItem>
+                      <SelectItem value="custom">{{ $t('campaigns.customRange') }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <SearchInput v-model="searchQuery" :placeholder="$t('campaigns.searchCampaigns') + '...'" class="w-48" />
+                  <Popover v-if="selectedRange === 'custom'" v-model:open="isDatePickerOpen">
+                    <PopoverTrigger as-child>
+                      <Button variant="outline" size="sm">
+                        <CalendarIcon class="h-4 w-4 mr-1" />
+                        {{ formatDateRangeDisplay || $t('common.select') }}
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent class="w-auto p-4" align="end">
+                      <div class="space-y-4">
+                        <RangeCalendar v-model="customDateRange" :number-of-months="2" />
+                        <Button class="w-full" size="sm" @click="applyCustomRange" :disabled="!customDateRange.start || !customDateRange.end">
+                          {{ $t('campaigns.applyRange') }}
+                        </Button>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
                 </div>
               </div>
-              <Badge variant="outline" :class="getStatusClass(campaign.status)">
-                <component :is="getStatusIcon(campaign.status)" class="h-3 w-3 mr-1" />
-                {{ campaign.status }}
-              </Badge>
-            </div>
-
-            <!-- Progress Bar -->
-            <div v-if="campaign.status === 'running' || campaign.status === 'processing'" class="mb-4">
-              <div class="flex items-center justify-between text-sm mb-1">
-                <span>Progress</span>
-                <span>{{ getProgressPercentage(campaign) }}%</span>
-              </div>
-              <Progress :model-value="getProgressPercentage(campaign)" class="h-2" />
-            </div>
-
-            <!-- Stats -->
-            <div class="grid grid-cols-5 gap-4 mb-4">
-              <div class="text-center">
-                <p class="text-2xl font-bold">{{ campaign.total_recipients.toLocaleString() }}</p>
-                <p class="text-xs text-muted-foreground">Recipients</p>
-              </div>
-              <div class="text-center">
-                <p class="text-2xl font-bold">{{ campaign.sent_count.toLocaleString() }}</p>
-                <p class="text-xs text-muted-foreground">Sent</p>
-              </div>
-              <div class="text-center">
-                <p class="text-2xl font-bold text-green-600">{{ campaign.delivered_count.toLocaleString() }}</p>
-                <p class="text-xs text-muted-foreground">Delivered</p>
-              </div>
-              <div class="text-center">
-                <p class="text-2xl font-bold text-blue-600">{{ campaign.read_count.toLocaleString() }}</p>
-                <p class="text-xs text-muted-foreground">Read</p>
-              </div>
-              <div class="text-center">
-                <p class="text-2xl font-bold text-destructive">{{ campaign.failed_count.toLocaleString() }}</p>
-                <p class="text-xs text-muted-foreground">Failed</p>
-              </div>
-            </div>
-
-            <!-- Timing Info -->
-            <div class="text-xs text-muted-foreground mb-4">
-              <span v-if="campaign.scheduled_at">
-                Scheduled: {{ formatDate(campaign.scheduled_at) }}
-              </span>
-              <span v-else-if="campaign.started_at">
-                Started: {{ formatDate(campaign.started_at) }}
-              </span>
-              <span v-else-if="campaign.completed_at">
-                Completed: {{ formatDate(campaign.completed_at) }}
-              </span>
-              <span v-else>
-                Created: {{ formatDate(campaign.created_at) }}
-              </span>
-            </div>
-
-            <!-- Media Upload Section (for templates with media header) -->
-            <div
-              v-if="getTemplateHeaderType(campaign.template_id) && getTemplateHeaderType(campaign.template_id) !== 'TEXT'"
-              class="mb-4 p-3 rounded-lg border bg-muted/30"
-            >
-              <div class="flex items-center gap-2 mb-2">
-                <component :is="getMediaIcon(getTemplateHeaderType(campaign.template_id))" class="h-4 w-4 text-muted-foreground" />
-                <span class="text-sm font-medium">Header Media ({{ getTemplateHeaderType(campaign.template_id) }})</span>
-              </div>
-
-              <div v-if="campaign.header_media_id" class="flex items-center gap-3 p-2 bg-green-50 dark:bg-green-950/30 rounded border border-green-200 dark:border-green-800">
-                <!-- Thumbnail -->
-                <div class="relative flex-shrink-0">
-                  <!-- Loading -->
-                  <div v-if="isMediaPreviewLoading(campaign.id)" class="w-12 h-12 flex items-center justify-center bg-muted rounded">
-                    <Loader2 class="h-4 w-4 animate-spin text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <DataTable
+                :items="campaigns"
+                :columns="columns"
+                :is-loading="isLoading"
+                :empty-icon="Megaphone"
+                :empty-title="searchQuery ? $t('campaigns.noMatchingCampaigns') : $t('campaigns.noCampaignsYet')"
+                :empty-description="searchQuery ? $t('campaigns.noMatchingCampaignsDesc') : $t('campaigns.noCampaignsYetDesc')"
+                v-model:sort-key="sortKey"
+                v-model:sort-direction="sortDirection"
+                server-pagination
+                :current-page="currentPage"
+                :total-items="totalItems"
+                :page-size="pageSize"
+                item-name="campaigns"
+                @page-change="handlePageChange"
+              >
+                <template #cell-name="{ item: campaign }">
+                  <div>
+                    <span class="font-medium">{{ campaign.name }}</span>
+                    <p class="text-xs text-muted-foreground">{{ campaign.template_name || $t('campaigns.noTemplate') }}</p>
                   </div>
-                  <!-- Image Thumbnail -->
-                  <img
-                    v-else-if="campaign.header_media_mime_type?.startsWith('image/') && isMediaPreviewAvailable(campaign.id)"
-                    :src="getMediaPreviewUrl(campaign.id)"
-                    :alt="campaign.header_media_filename"
-                    class="w-12 h-12 object-cover rounded"
-                  />
-                  <!-- Video Thumbnail -->
-                  <div v-else-if="campaign.header_media_mime_type?.startsWith('video/')" class="w-12 h-12 flex items-center justify-center bg-muted rounded">
-                    <Video class="h-5 w-5 text-muted-foreground" />
+                </template>
+                <template #cell-status="{ item: campaign }">
+                  <Badge variant="outline" :class="[getStatusClass(campaign.status), 'text-xs']">
+                    <component :is="getStatusIcon(campaign.status)" class="h-3 w-3 mr-1" />
+                    {{ campaign.status }}
+                  </Badge>
+                </template>
+                <template #cell-stats="{ item: campaign }">
+                  <div class="space-y-1">
+                    <div v-if="campaign.status === 'running' || campaign.status === 'processing'" class="w-32">
+                      <Progress :model-value="getProgressPercentage(campaign)" class="h-1.5" />
+                      <span class="text-xs text-muted-foreground">{{ getProgressPercentage(campaign) }}%</span>
+                    </div>
+                    <div class="flex items-center gap-3 text-xs">
+                      <span title="Recipients"><Users class="h-3 w-3 inline mr-0.5" />{{ campaign.total_recipients }}</span>
+                      <span class="text-green-600" title="Delivered">{{ campaign.delivered_count }}</span>
+                      <span class="text-blue-600" title="Read">{{ campaign.read_count }}</span>
+                      <span v-if="campaign.failed_count > 0" class="text-destructive" title="Failed">{{ campaign.failed_count }}</span>
+                    </div>
                   </div>
-                  <!-- Document Icon -->
-                  <div v-else class="w-12 h-12 flex items-center justify-center bg-muted rounded">
-                    <component :is="getMediaIcon(getTemplateHeaderType(campaign.template_id))" class="h-5 w-5 text-muted-foreground" />
-                  </div>
-                </div>
-                <!-- File Info -->
-                <div class="flex-1 min-w-0">
-                  <p class="text-sm font-medium text-green-700 dark:text-green-400 truncate">
-                    {{ campaign.header_media_filename || 'Media file' }}
-                  </p>
-                  <p class="text-xs text-muted-foreground">
-                    {{ campaign.header_media_mime_type || 'Unknown type' }}
-                  </p>
-                </div>
-                <!-- Preview Button -->
-                <Button
-                  v-if="isMediaPreviewAvailable(campaign.id) && (campaign.header_media_mime_type?.startsWith('image/') || campaign.header_media_mime_type?.startsWith('video/'))"
-                  variant="ghost"
-                  size="sm"
-                  @click="openMediaPreview(campaign)"
-                >
-                  <Eye class="h-4 w-4" />
-                </Button>
-                <CheckCircle class="h-4 w-4 text-green-600 flex-shrink-0" />
-              </div>
-
-              <div v-else-if="campaign.status === 'draft'" class="space-y-2">
-                <p class="text-xs text-muted-foreground">Upload media for template header</p>
-                <div v-if="selectedCampaign?.id === campaign.id && mediaFile">
-                  <div class="flex items-center gap-2 p-2 bg-background rounded border">
-                    <component :is="getMediaIcon(getTemplateHeaderType(campaign.template_id))" class="h-4 w-4" />
-                    <span class="text-sm flex-1 truncate">{{ mediaFile.name }}</span>
-                    <Button variant="ghost" size="icon" class="h-6 w-6" @click="clearMediaFile">
-                      <X class="h-3 w-3" />
-                    </Button>
-                  </div>
-                  <Button
-                    size="sm"
-                    class="mt-2"
-                    @click="uploadCampaignMedia"
-                    :disabled="isUploadingMedia"
-                  >
-                    <Loader2 v-if="isUploadingMedia" class="h-4 w-4 mr-1 animate-spin" />
-                    <Upload v-else class="h-4 w-4 mr-1" />
-                    Upload
-                  </Button>
-                </div>
-                <div v-else>
-                  <input
-                    type="file"
-                    :data-campaign-id="campaign.id"
-                    class="hidden"
-                    :accept="getAcceptedMediaTypes(getTemplateHeaderType(campaign.template_id))"
-                    @change="(e) => { selectedCampaign = campaign; handleMediaFileSelect(e) }"
-                  />
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    @click="triggerMediaFileInput(campaign.id)"
-                  >
-                    <Upload class="h-4 w-4 mr-1" />
-                    Select File
-                  </Button>
-                </div>
-              </div>
-
-              <div v-else class="flex items-center gap-2">
-                <AlertCircle class="h-4 w-4 text-amber-500" />
-                <span class="text-sm text-amber-600">No media uploaded</span>
-              </div>
-            </div>
-
-            <!-- Actions -->
-            <div class="flex items-center justify-between border-t pt-4">
-              <div class="flex gap-2">
-                <Tooltip>
-                  <TooltipTrigger as-child>
-                    <Button variant="ghost" size="icon" @click="viewRecipients(campaign)">
+                </template>
+                <template #cell-created_at="{ item: campaign }">
+                  <span class="text-muted-foreground text-sm">{{ formatDate(campaign.created_at) }}</span>
+                </template>
+                <template #cell-actions="{ item: campaign }">
+                  <div class="flex items-center justify-end gap-1">
+                    <Button variant="ghost" size="icon" class="h-8 w-8" @click="viewRecipients(campaign)" title="View Recipients">
                       <Eye class="h-4 w-4" />
                     </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>View Recipients</TooltipContent>
-                </Tooltip>
-                <Tooltip v-if="campaign.status === 'draft'">
-                  <TooltipTrigger as-child>
-                    <Button variant="ghost" size="icon" @click="openAddRecipientsDialog(campaign as any)">
+                    <Button v-if="campaign.status === 'draft'" variant="ghost" size="icon" class="h-8 w-8" @click="openAddRecipientsDialog(campaign as any)" title="Add Recipients">
                       <UserPlus class="h-4 w-4" />
                     </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Add Recipients</TooltipContent>
-                </Tooltip>
-                <Tooltip v-if="campaign.status === 'draft'">
-                  <TooltipTrigger as-child>
-                    <Button variant="ghost" size="icon" @click="openEditDialog(campaign)">
+                    <Button v-if="campaign.status === 'draft'" variant="ghost" size="icon" class="h-8 w-8" @click="openEditDialog(campaign)" title="Edit">
                       <Pencil class="h-4 w-4" />
                     </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Edit Campaign</TooltipContent>
-                </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger as-child>
+                    <Button
+                      v-if="campaign.status === 'draft' || campaign.status === 'scheduled'"
+                      variant="ghost"
+                      size="icon"
+                      class="h-8 w-8 text-green-600"
+                      @click="startCampaign(campaign)"
+                      title="Start"
+                    >
+                      <Play class="h-4 w-4" />
+                    </Button>
+                    <Button
+                      v-if="campaign.status === 'running' || campaign.status === 'processing'"
+                      variant="ghost"
+                      size="icon"
+                      class="h-8 w-8"
+                      @click="pauseCampaign(campaign)"
+                      title="Pause"
+                    >
+                      <Pause class="h-4 w-4" />
+                    </Button>
+                    <Button
+                      v-if="campaign.status === 'paused'"
+                      variant="ghost"
+                      size="icon"
+                      class="h-8 w-8 text-green-600"
+                      @click="startCampaign(campaign)"
+                      title="Resume"
+                    >
+                      <Play class="h-4 w-4" />
+                    </Button>
+                    <Button
+                      v-if="campaign.failed_count > 0 && (campaign.status === 'completed' || campaign.status === 'paused' || campaign.status === 'failed')"
+                      variant="ghost"
+                      size="icon"
+                      class="h-8 w-8"
+                      @click="retryFailed(campaign)"
+                      title="Retry Failed"
+                    >
+                      <RefreshCw class="h-4 w-4" />
+                    </Button>
+                    <Button
+                      v-if="campaign.status === 'running' || campaign.status === 'paused' || campaign.status === 'processing' || campaign.status === 'queued'"
+                      variant="ghost"
+                      size="icon"
+                      class="h-8 w-8 text-destructive"
+                      @click="openCancelDialog(campaign)"
+                      title="Cancel"
+                    >
+                      <XCircle class="h-4 w-4" />
+                    </Button>
                     <Button
                       variant="ghost"
                       size="icon"
+                      class="h-8 w-8 text-destructive"
                       @click="openDeleteDialog(campaign)"
                       :disabled="campaign.status === 'running' || campaign.status === 'processing'"
+                      title="Delete"
                     >
-                      <Trash2 class="h-4 w-4 text-destructive" />
+                      <Trash2 class="h-4 w-4" />
                     </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Delete Campaign</TooltipContent>
-                </Tooltip>
-              </div>
-              <div class="flex gap-2">
-                <Button
-                  v-if="campaign.status === 'draft' || campaign.status === 'scheduled'"
-                  size="sm"
-                  @click="startCampaign(campaign)"
-                >
-                  <Play class="h-4 w-4 mr-1" />
-                  Start
-                </Button>
-                <Button
-                  v-if="campaign.status === 'running' || campaign.status === 'processing'"
-                  variant="outline"
-                  size="sm"
-                  @click="pauseCampaign(campaign)"
-                >
-                  <Pause class="h-4 w-4 mr-1" />
-                  Pause
-                </Button>
-                <Button
-                  v-if="campaign.status === 'paused'"
-                  size="sm"
-                  @click="startCampaign(campaign)"
-                >
-                  <Play class="h-4 w-4 mr-1" />
-                  Resume
-                </Button>
-                <Button
-                  v-if="campaign.failed_count > 0 && (campaign.status === 'completed' || campaign.status === 'paused' || campaign.status === 'failed')"
-                  variant="outline"
-                  size="sm"
-                  @click="retryFailed(campaign)"
-                >
-                  <RefreshCw class="h-4 w-4 mr-1" />
-                  Retry Failed
-                </Button>
-                <Button
-                  v-if="campaign.status === 'running' || campaign.status === 'paused' || campaign.status === 'processing' || campaign.status === 'queued'"
-                  variant="destructive"
-                  size="sm"
-                  @click="openCancelDialog(campaign)"
-                >
-                  <XCircle class="h-4 w-4 mr-1" />
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        <!-- Empty State -->
-        <Card v-if="campaigns.length === 0 && !isLoading">
-          <CardContent class="py-12 text-center text-muted-foreground">
-            <Megaphone class="h-12 w-12 mx-auto mb-4 opacity-50" />
-            <p class="text-lg font-medium">No campaigns yet</p>
-            <p class="text-sm mb-4">Create your first bulk messaging campaign.</p>
-            <Button variant="outline" size="sm" @click="showCreateDialog = true">
-              <Plus class="h-4 w-4 mr-2" />
-              Create Campaign
-            </Button>
-          </CardContent>
-        </Card>
+                  </div>
+                </template>
+                <template #empty-action>
+                  <Button v-if="!searchQuery" variant="outline" size="sm" @click="showCreateDialog = true">
+                    <Plus class="h-4 w-4 mr-2" />
+                    {{ $t('campaigns.createCampaign') }}
+                  </Button>
+                </template>
+              </DataTable>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     </ScrollArea>
 
@@ -1637,9 +1413,9 @@ async function addRecipientsFromCSV() {
     <Dialog v-model:open="showRecipientsDialog">
       <DialogContent class="sm:max-w-[700px] max-h-[80vh]">
         <DialogHeader>
-          <DialogTitle>Campaign Recipients</DialogTitle>
+          <DialogTitle>{{ $t('campaigns.campaignRecipients') }}</DialogTitle>
           <DialogDescription>
-            {{ selectedCampaign?.name }} - {{ recipients.length }} recipient(s)
+            {{ selectedCampaign?.name }} - {{ $t('campaigns.recipientCount', { count: recipients.length }) }}
           </DialogDescription>
         </DialogHeader>
         <div class="py-4">
@@ -1648,7 +1424,7 @@ async function addRecipientsFromCSV() {
           </div>
           <div v-else-if="recipients.length === 0" class="text-center py-8 text-muted-foreground">
             <Users class="h-12 w-12 mx-auto mb-2 opacity-50" />
-            <p>No recipients added yet</p>
+            <p>{{ $t('campaigns.noRecipientsYet') }}</p>
             <Button
               v-if="selectedCampaign?.status === 'draft'"
               variant="outline"
@@ -1657,17 +1433,17 @@ async function addRecipientsFromCSV() {
               @click="showRecipientsDialog = false; openAddRecipientsDialog(selectedCampaign as any)"
             >
               <UserPlus class="h-4 w-4 mr-2" />
-              Add Recipients
+              {{ $t('campaigns.addRecipients') }}
             </Button>
           </div>
           <ScrollArea v-else class="h-[400px]">
             <table class="w-full text-sm">
               <thead class="sticky top-0 bg-background border-b">
                 <tr>
-                  <th class="text-left py-2 px-2">Phone Number</th>
-                  <th class="text-left py-2 px-2">Name</th>
-                  <th class="text-left py-2 px-2">Status</th>
-                  <th class="text-left py-2 px-2">Sent At</th>
+                  <th class="text-left py-2 px-2">{{ $t('campaigns.phoneNumber') }}</th>
+                  <th class="text-left py-2 px-2">{{ $t('campaigns.name') }}</th>
+                  <th class="text-left py-2 px-2">{{ $t('campaigns.status') }}</th>
+                  <th class="text-left py-2 px-2">{{ $t('campaigns.sentAt') }}</th>
                   <th v-if="selectedCampaign?.status === 'draft'" class="text-center py-2 px-2 w-16"></th>
                 </tr>
               </thead>
@@ -1713,9 +1489,9 @@ async function addRecipientsFromCSV() {
             @click="showRecipientsDialog = false; openAddRecipientsDialog(selectedCampaign as any)"
           >
             <UserPlus class="h-4 w-4 mr-2" />
-            Add More
+            {{ $t('campaigns.addMore') }}
           </Button>
-          <Button variant="outline" size="sm" @click="showRecipientsDialog = false">Close</Button>
+          <Button variant="outline" size="sm" @click="showRecipientsDialog = false">{{ $t('common.close') }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -1724,11 +1500,11 @@ async function addRecipientsFromCSV() {
     <Dialog v-model:open="showAddRecipientsDialog">
       <DialogContent class="sm:max-w-[700px] max-h-[85vh]">
         <DialogHeader>
-          <DialogTitle>Add Recipients</DialogTitle>
+          <DialogTitle>{{ $t('campaigns.addRecipients') }}</DialogTitle>
           <DialogDescription>
-            Add recipients to "{{ selectedCampaign?.name }}"
+            {{ $t('campaigns.addRecipientsTo', { name: selectedCampaign?.name }) }}
             <span v-if="templateParamNames.length > 0" class="block mt-1">
-              Template requires {{ templateParamNames.length }} parameter(s)
+              {{ $t('campaigns.templateRequiresParams', { count: templateParamNames.length }) }}
             </span>
           </DialogDescription>
         </DialogHeader>
@@ -1737,7 +1513,7 @@ async function addRecipientsFromCSV() {
         <div v-if="selectedTemplate?.body_content" class="mb-4 p-3 bg-muted/50 rounded-lg border">
           <div class="flex items-center gap-2 mb-2">
             <MessageSquare class="h-4 w-4 text-muted-foreground" />
-            <span class="text-sm font-medium">Template Preview</span>
+            <span class="text-sm font-medium">{{ $t('campaigns.templatePreview') }}</span>
           </div>
           <p class="text-sm whitespace-pre-wrap" v-html="highlightTemplateParams(selectedTemplate.body_content)"></p>
         </div>
@@ -1746,11 +1522,11 @@ async function addRecipientsFromCSV() {
           <TabsList class="grid w-full grid-cols-2">
             <TabsTrigger value="manual">
               <UserPlus class="h-4 w-4 mr-2" />
-              Manual Entry
+              {{ $t('campaigns.manualEntry') }}
             </TabsTrigger>
             <TabsTrigger value="csv">
               <FileSpreadsheet class="h-4 w-4 mr-2" />
-              Upload CSV
+              {{ $t('campaigns.uploadCsv') }}
             </TabsTrigger>
           </TabsList>
 
@@ -1758,42 +1534,42 @@ async function addRecipientsFromCSV() {
           <TabsContent value="manual" class="mt-4">
             <div class="space-y-4">
               <div class="bg-muted p-3 rounded-lg text-sm">
-                <p class="font-medium mb-2">Format (one per line):</p>
+                <p class="font-medium mb-2">{{ $t('campaigns.formatOneLine') }}</p>
                 <code class="bg-background px-2 py-1 rounded block">{{ manualEntryFormat }}</code>
                 <p v-if="templateParamNames.length > 0" class="text-muted-foreground mt-2 text-xs">
-                  Template parameters: <span v-for="(param, idx) in templateParamNames" :key="param"><code class="bg-background px-1 rounded">{{ formatParamName(param) }}</code><span v-if="idx < templateParamNames.length - 1">, </span></span>
+                  {{ $t('campaigns.templateParameters') }} <span v-for="(param, idx) in templateParamNames" :key="param"><code class="bg-background px-1 rounded">{{ formatParamName(param) }}</code><span v-if="idx < templateParamNames.length - 1">, </span></span>
                 </p>
               </div>
               <div class="space-y-2">
-                <Label for="recipients">Recipients</Label>
+                <Label for="recipients">{{ $t('campaigns.recipientsLabel') }}</Label>
                 <Textarea
                   id="recipients"
                   v-model="recipientsInput"
                   :placeholder="recipientPlaceholder"
-                  rows="8"
+                  :rows="8"
                   class="font-mono text-sm"
                   :disabled="isAddingRecipients"
                 />
                 <!-- Validation status -->
                 <div v-if="recipientsInput.trim()" class="space-y-2">
                   <p v-if="manualInputValidation.isValid" class="text-xs text-green-600">
-                    {{ manualInputValidation.validLines }} recipient(s) valid
+                    {{ $t('campaigns.recipientsValid', { count: manualInputValidation.validLines }) }}
                   </p>
                   <div v-else-if="manualInputValidation.invalidLines.length > 0" class="text-xs">
                     <p class="text-destructive font-medium mb-1">
-                      {{ manualInputValidation.invalidLines.length }} of {{ manualInputValidation.totalLines }} line(s) have errors:
+                      {{ $t('campaigns.linesHaveErrors', { invalid: manualInputValidation.invalidLines.length, total: manualInputValidation.totalLines }) }}
                     </p>
                     <ul class="text-destructive space-y-0.5 max-h-20 overflow-y-auto">
                       <li v-for="err in manualInputValidation.invalidLines.slice(0, 5)" :key="err.lineNumber">
-                        Line {{ err.lineNumber }}: {{ err.reason }}
+                        {{ $t('campaigns.lineError', { line: err.lineNumber, reason: err.reason }) }}
                       </li>
                       <li v-if="manualInputValidation.invalidLines.length > 5" class="text-muted-foreground">
-                        ... and {{ manualInputValidation.invalidLines.length - 5 }} more errors
+                        {{ $t('campaigns.andMoreErrors', { count: manualInputValidation.invalidLines.length - 5 }) }}
                       </li>
                     </ul>
                   </div>
                   <p v-else class="text-xs text-muted-foreground">
-                    {{ manualInputValidation.totalLines }} recipient(s) entered
+                    {{ $t('campaigns.recipientsEntered', { count: manualInputValidation.totalLines }) }}
                   </p>
                 </div>
               </div>
@@ -1801,7 +1577,7 @@ async function addRecipientsFromCSV() {
                 <Button @click="addRecipients" :disabled="isAddingRecipients || !manualInputValidation.isValid">
                   <Loader2 v-if="isAddingRecipients" class="h-4 w-4 mr-2 animate-spin" />
                   <Upload v-else class="h-4 w-4 mr-2" />
-                  Add Recipients
+                  {{ $t('campaigns.addRecipients') }}
                 </Button>
               </div>
             </div>
@@ -1812,18 +1588,18 @@ async function addRecipientsFromCSV() {
             <div class="space-y-4">
               <!-- CSV Format Info -->
               <div class="bg-muted p-3 rounded-lg text-sm">
-                <p class="font-medium mb-2">Required CSV Columns:</p>
+                <p class="font-medium mb-2">{{ $t('campaigns.requiredCsvColumns') }}</p>
                 <div class="flex flex-wrap gap-2">
                   <code v-for="col in csvColumnsHint" :key="col" class="bg-background px-2 py-1 rounded text-xs">{{ col }}</code>
                 </div>
                 <p v-if="templateParamNames.length > 0" class="text-muted-foreground mt-2 text-xs">
-                  Template parameters: <span v-for="(param, idx) in templateParamNames" :key="param"><code class="bg-background px-1 rounded">{{ formatParamName(param) }}</code><span v-if="idx < templateParamNames.length - 1">, </span></span>
+                  {{ $t('campaigns.templateParameters') }} <span v-for="(param, idx) in templateParamNames" :key="param"><code class="bg-background px-1 rounded">{{ formatParamName(param) }}</code><span v-if="idx < templateParamNames.length - 1">, </span></span>
                 </p>
               </div>
 
               <!-- File Upload -->
               <div class="space-y-2">
-                <Label for="csv-file">Select CSV File</Label>
+                <Label for="csv-file">{{ $t('campaigns.selectCsvFile') }}</Label>
                 <div class="flex items-center gap-2">
                   <Input
                     id="csv-file"
@@ -1848,7 +1624,7 @@ async function addRecipientsFromCSV() {
               <!-- Validation Results -->
               <div v-if="isValidatingCSV" class="flex items-center justify-center py-8">
                 <Loader2 class="h-6 w-6 animate-spin text-muted-foreground" />
-                <span class="ml-2 text-muted-foreground">Validating CSV...</span>
+                <span class="ml-2 text-muted-foreground">{{ $t('campaigns.validatingCsv') }}</span>
               </div>
 
               <div v-else-if="csvValidation" class="space-y-4">
@@ -1856,7 +1632,7 @@ async function addRecipientsFromCSV() {
                 <div v-if="csvValidation.errors.length > 0" class="bg-destructive/10 border border-destructive/20 rounded-lg p-3">
                   <div class="flex items-center gap-2 text-destructive font-medium mb-2">
                     <AlertTriangle class="h-4 w-4" />
-                    Validation Errors
+                    {{ $t('campaigns.validationErrors') }}
                   </div>
                   <ul class="list-disc list-inside text-sm text-destructive">
                     <li v-for="error in csvValidation.errors" :key="error">{{ error }}</li>
@@ -1867,7 +1643,7 @@ async function addRecipientsFromCSV() {
                 <div v-if="csvValidation.warnings && csvValidation.warnings.length > 0" class="bg-orange-500/10 border border-orange-500/20 rounded-lg p-3">
                   <div class="flex items-center gap-2 text-orange-600 font-medium mb-2">
                     <AlertTriangle class="h-4 w-4" />
-                    Warnings
+                    {{ $t('campaigns.warnings') }}
                   </div>
                   <ul class="list-disc list-inside text-sm text-orange-600">
                     <li v-for="warning in csvValidation.warnings" :key="warning">{{ warning }}</li>
@@ -1876,7 +1652,7 @@ async function addRecipientsFromCSV() {
 
                 <!-- Column Mapping Info -->
                 <div v-if="csvValidation.columnMapping && csvValidation.columnMapping.length > 0" class="bg-muted/50 border rounded-lg p-3">
-                  <div class="text-sm font-medium mb-2">Column Mapping</div>
+                  <div class="text-sm font-medium mb-2">{{ $t('campaigns.columnMapping') }}</div>
                   <div class="flex flex-wrap gap-2">
                     <div
                       v-for="mapping in csvValidation.columnMapping"
@@ -1894,18 +1670,18 @@ async function addRecipientsFromCSV() {
                 <div class="flex flex-wrap items-center gap-4 text-sm">
                   <div class="flex items-center gap-1">
                     <Check class="h-4 w-4 text-green-600" />
-                    <span>{{ csvValidation.rows.filter(r => r.isValid).length }} valid</span>
+                    <span>{{ csvValidation.rows.filter(r => r.isValid).length }} {{ $t('campaigns.valid') }}</span>
                   </div>
                   <div v-if="csvValidation.rows.filter(r => !r.isValid).length > 0" class="flex items-center gap-1">
                     <AlertTriangle class="h-4 w-4 text-destructive" />
-                    <span>{{ csvValidation.rows.filter(r => !r.isValid).length }} invalid</span>
+                    <span>{{ csvValidation.rows.filter(r => !r.isValid).length }} {{ $t('campaigns.invalid') }}</span>
                   </div>
                   <div v-if="csvValidation.rows.filter(r => r.errors.some(e => e.includes('Duplicate'))).length > 0" class="flex items-center gap-1 text-orange-600">
                     <Users class="h-4 w-4" />
-                    <span>{{ csvValidation.rows.filter(r => r.errors.some(e => e.includes('Duplicate'))).length }} duplicates</span>
+                    <span>{{ csvValidation.rows.filter(r => r.errors.some(e => e.includes('Duplicate'))).length }} {{ $t('campaigns.duplicates') }}</span>
                   </div>
                   <div class="text-muted-foreground">
-                    Columns: {{ csvValidation.csvColumns.join(', ') }}
+                    {{ $t('campaigns.columns') }} {{ csvValidation.csvColumns.join(', ') }}
                   </div>
                 </div>
 
@@ -1916,9 +1692,9 @@ async function addRecipientsFromCSV() {
                       <thead class="sticky top-0 bg-muted border-b">
                         <tr>
                           <th class="text-left py-2 px-3 w-8"></th>
-                          <th class="text-left py-2 px-3">Phone</th>
-                          <th class="text-left py-2 px-3">Name</th>
-                          <th class="text-left py-2 px-3">Parameters</th>
+                          <th class="text-left py-2 px-3">{{ $t('campaigns.phone') }}</th>
+                          <th class="text-left py-2 px-3">{{ $t('campaigns.name') }}</th>
+                          <th class="text-left py-2 px-3">{{ $t('campaigns.parameters') }}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1951,7 +1727,7 @@ async function addRecipientsFromCSV() {
                     </table>
                   </ScrollArea>
                   <div v-if="csvValidation.rows.length > 50" class="text-xs text-muted-foreground text-center py-2 border-t">
-                    Showing first 50 of {{ csvValidation.rows.length }} rows
+                    {{ $t('campaigns.showingFirst', { count: 50, total: csvValidation.rows.length }) }}
                   </div>
                 </div>
 
@@ -1963,7 +1739,7 @@ async function addRecipientsFromCSV() {
                   >
                     <Loader2 v-if="isAddingRecipients" class="h-4 w-4 mr-2 animate-spin" />
                     <Upload v-else class="h-4 w-4 mr-2" />
-                    Import {{ csvValidation.rows.filter(r => r.isValid).length }} Recipients
+                    {{ $t('campaigns.importRecipients', { count: csvValidation.rows.filter(r => r.isValid).length }) }}
                   </Button>
                 </div>
               </div>
@@ -1971,7 +1747,7 @@ async function addRecipientsFromCSV() {
               <!-- Empty state -->
               <div v-else class="text-center py-8 text-muted-foreground">
                 <FileSpreadsheet class="h-12 w-12 mx-auto mb-2 opacity-50" />
-                <p>Select a CSV file to preview and validate</p>
+                <p>{{ $t('campaigns.selectCsvToPreview') }}</p>
               </div>
             </div>
           </TabsContent>
@@ -1979,40 +1755,31 @@ async function addRecipientsFromCSV() {
 
         <DialogFooter class="border-t pt-4 mt-4">
           <Button variant="outline" size="sm" @click="showAddRecipientsDialog = false" :disabled="isAddingRecipients">
-            Cancel
+            {{ $t('common.cancel') }}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
 
-    <!-- Delete Confirmation Dialog -->
-    <AlertDialog v-model:open="deleteDialogOpen">
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Delete Campaign</AlertDialogTitle>
-          <AlertDialogDescription>
-            Are you sure you want to delete "{{ campaignToDelete?.name }}"? This action cannot be undone.
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction @click="confirmDeleteCampaign">Delete</AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+    <DeleteConfirmDialog
+      v-model:open="deleteDialogOpen"
+      :title="$t('campaigns.deleteCampaign')"
+      :item-name="campaignToDelete?.name"
+      @confirm="confirmDeleteCampaign"
+    />
 
     <!-- Cancel Confirmation Dialog -->
     <AlertDialog v-model:open="cancelDialogOpen">
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Cancel Campaign</AlertDialogTitle>
+          <AlertDialogTitle>{{ $t('campaigns.cancelConfirmTitle') }}</AlertDialogTitle>
           <AlertDialogDescription>
-            Are you sure you want to cancel "{{ campaignToCancel?.name }}"? This will stop all pending messages.
+            {{ $t('campaigns.cancelConfirmDesc', { name: campaignToCancel?.name }) }}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel>Keep Running</AlertDialogCancel>
-          <AlertDialogAction @click="confirmCancelCampaign">Cancel Campaign</AlertDialogAction>
+          <AlertDialogCancel>{{ $t('campaigns.keepRunning') }}</AlertDialogCancel>
+          <AlertDialogAction @click="confirmCancelCampaign">{{ $t('campaigns.cancelCampaign') }}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
@@ -2021,7 +1788,7 @@ async function addRecipientsFromCSV() {
     <Dialog v-model:open="showMediaPreviewDialog">
       <DialogContent class="sm:max-w-[600px]">
         <DialogHeader>
-          <DialogTitle>Media Preview</DialogTitle>
+          <DialogTitle>{{ $t('campaigns.mediaPreview') }}</DialogTitle>
           <DialogDescription>
             {{ previewingCampaign?.header_media_filename }}
           </DialogDescription>
@@ -2041,7 +1808,7 @@ async function addRecipientsFromCSV() {
           />
         </div>
         <DialogFooter>
-          <Button variant="outline" @click="showMediaPreviewDialog = false">Close</Button>
+          <Button variant="outline" @click="showMediaPreviewDialog = false">{{ $t('common.close') }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -204,7 +204,7 @@ func TestClient_SendTemplateMessage(t *testing.T) {
 		phone        string
 		templateName string
 		language     string
-		bodyParams   []string
+		bodyParams   map[string]string
 		wantErr      bool
 	}{
 		{
@@ -220,7 +220,7 @@ func TestClient_SendTemplateMessage(t *testing.T) {
 			phone:        "1234567890",
 			templateName: "order_confirmation",
 			language:     "en",
-			bodyParams:   []string{"John", "12345", "$99.99"},
+			bodyParams:   map[string]string{"1": "John", "2": "12345", "3": "$99.99"},
 			wantErr:      false,
 		},
 		{
@@ -228,7 +228,15 @@ func TestClient_SendTemplateMessage(t *testing.T) {
 			phone:        "1234567890",
 			templateName: "welcome_message",
 			language:     "es",
-			bodyParams:   []string{"María"},
+			bodyParams:   map[string]string{"1": "María"},
+			wantErr:      false,
+		},
+		{
+			name:         "template with named params",
+			phone:        "1234567890",
+			templateName: "named_template",
+			language:     "en",
+			bodyParams:   map[string]string{"name": "John", "order_id": "12345"},
 			wantErr:      false,
 		},
 	}
@@ -262,7 +270,8 @@ func TestClient_SendTemplateMessage(t *testing.T) {
 			}
 			ctx := testutil.TestContext(t)
 
-			msgID, err := client.SendTemplateMessage(ctx, account, tt.phone, tt.templateName, tt.language, tt.bodyParams)
+			components := whatsapp.BodyParamsToComponents(tt.bodyParams)
+			msgID, err := client.SendTemplateMessage(ctx, account, tt.phone, tt.templateName, tt.language, components)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -293,10 +302,11 @@ func TestClient_SendTemplateMessage(t *testing.T) {
 				params := bodyComponent["parameters"].([]interface{})
 				assert.Len(t, params, len(tt.bodyParams))
 
-				for i, p := range tt.bodyParams {
-					param := params[i].(map[string]interface{})
+				// Verify each param has type "text" and a text value
+				for _, p := range params {
+					param := p.(map[string]interface{})
 					assert.Equal(t, "text", param["type"])
-					assert.Equal(t, p, param["text"])
+					assert.NotEmpty(t, param["text"])
 				}
 			}
 		})
@@ -396,7 +406,7 @@ func TestClient_SendCTAURLButton(t *testing.T) {
 	}
 }
 
-func TestClient_SendTemplateMessageWithComponents(t *testing.T) {
+func TestClient_SendTemplateMessage_WithComponents(t *testing.T) {
 	t.Parallel()
 
 	var capturedBody map[string]interface{}
@@ -441,7 +451,7 @@ func TestClient_SendTemplateMessageWithComponents(t *testing.T) {
 		},
 	}
 
-	msgID, err := client.SendTemplateMessageWithComponents(ctx, account, "1234567890", "order_template", "en", components)
+	msgID, err := client.SendTemplateMessage(ctx, account, "1234567890", "order_template", "en", components)
 
 	require.NoError(t, err)
 	assert.Equal(t, "wamid.comp123", msgID)

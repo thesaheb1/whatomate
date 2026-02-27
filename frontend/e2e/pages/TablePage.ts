@@ -65,33 +65,22 @@ export class TablePage extends BasePage {
       return
     }
 
-    // Strategy 3: Icon button with tooltip (hover to show tooltip, then find by tooltip content)
-    // For Edit - look for Pencil icon button
-    // For Delete - look for Trash icon button
+    // Strategy 3: Position-based selectors in last column (actions column)
+    const actionButtons = row.locator('td:last-child button')
+    const buttonCount = await actionButtons.count()
+
     if (action.toLowerCase() === 'edit') {
-      const editButton = row.locator('button').filter({ has: this.page.locator('svg.lucide-pencil, svg[class*="pencil"]') })
-      if (await editButton.count() > 0) {
-        await editButton.click()
-        return
-      }
-      // Fallback: first small icon button that's not delete
-      const iconButtons = row.locator('button[class*="icon"], button:has(svg)').first()
-      await iconButtons.click()
+      // Edit is typically second-to-last button (before delete), or first if only 2 buttons
+      // Common patterns: [edit, delete] or [extra, edit, delete] or [extra1, extra2, edit, delete]
+      const editIndex = buttonCount <= 2 ? 0 : buttonCount - 2
+      await actionButtons.nth(editIndex).click()
       return
     }
 
     if (action.toLowerCase() === 'delete') {
-      const deleteButton = row.locator('button').filter({ has: this.page.locator('svg.lucide-trash, svg[class*="trash"]') })
-      if (await deleteButton.count() > 0) {
-        await deleteButton.click()
-        return
-      }
-      // Fallback: look for button with destructive styling
-      const destructiveButton = row.locator('button:has(svg[class*="destructive"]), button svg.text-destructive').locator('..')
-      if (await destructiveButton.count() > 0) {
-        await destructiveButton.click()
-        return
-      }
+      // Delete is typically the last button in actions column
+      await actionButtons.last().click()
+      return
     }
 
     throw new Error(`Could not find action button: ${action}`)
@@ -125,5 +114,51 @@ export class TablePage extends BasePage {
     const hasEmptyMessage = await emptyMessage.count() > 0
     const rowCount = await this.getRowCount()
     expect(hasEmptyMessage || rowCount === 0).toBeTruthy()
+  }
+
+  // Sorting helpers
+  getColumnHeader(columnName: string): Locator {
+    return this.page.locator('thead th').filter({ hasText: columnName })
+  }
+
+  async clickColumnHeader(columnName: string) {
+    await this.getColumnHeader(columnName).click()
+    await this.page.waitForTimeout(300)
+  }
+
+  async getSortDirection(columnName: string): Promise<'asc' | 'desc' | null> {
+    const header = this.getColumnHeader(columnName)
+    // Lucide icons render with class like 'lucide-arrow-up-icon'
+    const arrowUp = header.locator('.lucide-arrow-up-icon')
+    const arrowDown = header.locator('.lucide-arrow-down-icon')
+
+    if (await arrowUp.count() > 0) return 'asc'
+    if (await arrowDown.count() > 0) return 'desc'
+    return null
+  }
+
+  async expectSortDirection(columnName: string, direction: 'asc' | 'desc') {
+    const actual = await this.getSortDirection(columnName)
+    expect(actual).toBe(direction)
+  }
+
+  async getColumnValues(columnIndex: number): Promise<string[]> {
+    const cells = this.page.locator(`tbody tr td:nth-child(${columnIndex + 1})`)
+    const count = await cells.count()
+    const values: string[] = []
+    for (let i = 0; i < count; i++) {
+      const text = await cells.nth(i).textContent()
+      values.push(text?.trim() || '')
+    }
+    return values
+  }
+
+  async expectColumnSorted(columnIndex: number, direction: 'asc' | 'desc') {
+    const values = await this.getColumnValues(columnIndex)
+    const sorted = [...values].sort((a, b) => {
+      const comparison = a.localeCompare(b, undefined, { sensitivity: 'base' })
+      return direction === 'asc' ? comparison : -comparison
+    })
+    expect(values).toEqual(sorted)
   }
 }

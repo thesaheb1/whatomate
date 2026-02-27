@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shridarpatil/whatomate/internal/contactutil"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/shridarpatil/whatomate/internal/websocket"
 	"github.com/shridarpatil/whatomate/pkg/whatsapp"
@@ -122,7 +123,7 @@ func (a *App) processIncomingMessageFull(phoneNumberID string, msg IncomingTextM
 	}
 
 	// Get or create contact (always do this for all incoming messages)
-	contact, isNewContact := a.getOrCreateContact(account.OrganizationID, msg.From, profileName)
+	contact, isNewContact, _ := contactutil.GetOrCreateContact(a.DB, account.OrganizationID, msg.From, profileName)
 
 	// Dispatch webhook if new contact was created
 	if isNewContact {
@@ -577,50 +578,104 @@ func (a *App) sendAndSaveTextMessage(account *models.WhatsAppAccount, contact *m
 	return err
 }
 
-// sendAndSaveInteractiveButtons sends an interactive button message and saves it to the database
-// Uses the unified SendOutgoingMessage for consistent behavior
+// sendAndSaveInteractiveButtons sends an interactive button message and saves it to the database.
+// Buttons with type "url" are automatically separated and sent as CTA URL messages,
+// since WhatsApp doesn't allow mixing reply buttons and URL buttons in the same message.
 func (a *App) sendAndSaveInteractiveButtons(account *models.WhatsAppAccount, contact *models.Contact, bodyText string, buttons []map[string]interface{}) error {
-	// Convert buttons to whatsapp.Button format
-	waButtons := make([]whatsapp.Button, 0, len(buttons))
-	for i, btn := range buttons {
-		if i >= 10 {
-			break
+	// Separate reply buttons from CTA buttons (url / phone)
+	replyButtons := make([]map[string]interface{}, 0, len(buttons))
+	ctaButtons := make([]map[string]interface{}, 0)
+	for _, btn := range buttons {
+		btnType, _ := btn["type"].(string)
+		switch btnType {
+		case "url":
+			ctaButtons = append(ctaButtons, btn)
+		case "phone":
+			// Convert phone button to CTA URL with tel: scheme
+			phoneNumber, _ := btn["phone_number"].(string)
+			if phoneNumber != "" {
+				ctaButtons = append(ctaButtons, map[string]interface{}{
+					"title": btn["title"],
+					"url":   "tel:" + phoneNumber,
+				})
+			}
+		default:
+			replyButtons = append(replyButtons, btn)
 		}
-		buttonID, _ := btn["id"].(string)
-		buttonTitle, _ := btn["title"].(string)
-		if buttonID == "" {
-			buttonID = fmt.Sprintf("btn_%d", i+1)
-		}
-		if buttonTitle == "" {
-			continue
-		}
-		waButtons = append(waButtons, whatsapp.Button{
-			ID:    buttonID,
-			Title: buttonTitle,
-		})
 	}
 
-	// Fall back to text if no buttons
-	if len(waButtons) == 0 {
+	// WhatsApp doesn't allow mixing reply and CTA buttons.
+	// If both exist (legacy configs), ignore CTA buttons.
+	if len(replyButtons) > 0 && len(ctaButtons) > 0 {
+		ctaButtons = nil
+	}
+
+	// Send reply buttons (with the body text)
+	if len(replyButtons) > 0 {
+		waButtons := make([]whatsapp.Button, 0, len(replyButtons))
+		for i, btn := range replyButtons {
+			if i >= 10 {
+				break
+			}
+			buttonID, _ := btn["id"].(string)
+			buttonTitle, _ := btn["title"].(string)
+			if buttonID == "" {
+				buttonID = fmt.Sprintf("btn_%d", i+1)
+			}
+			if buttonTitle == "" {
+				continue
+			}
+			waButtons = append(waButtons, whatsapp.Button{
+				ID:    buttonID,
+				Title: buttonTitle,
+			})
+		}
+
+		if len(waButtons) > 0 {
+			interactiveType := "button"
+			if len(waButtons) > 3 {
+				interactiveType = "list"
+			}
+			ctx := context.Background()
+			if _, err := a.SendOutgoingMessage(ctx, OutgoingMessageRequest{
+				Account:         account,
+				Contact:         contact,
+				Type:            models.MessageTypeInteractive,
+				InteractiveType: interactiveType,
+				BodyText:        bodyText,
+				Buttons:         waButtons,
+			}, ChatbotSendOptions()); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Send CTA-only buttons (no reply buttons mixed in)
+	// WhatsApp allows max 2 CTA buttons, each sent as a separate cta_url message.
+	if len(ctaButtons) > 2 {
+		ctaButtons = ctaButtons[:2]
+	}
+	for i, ctaBtn := range ctaButtons {
+		btnTitle, _ := ctaBtn["title"].(string)
+		btnURL, _ := ctaBtn["url"].(string)
+		if btnTitle != "" && btnURL != "" {
+			// First CTA button carries the body text
+			ctaBody := bodyText
+			if i > 0 {
+				ctaBody = btnTitle
+			}
+			if err := a.sendAndSaveCTAURLButton(account, contact, ctaBody, btnTitle, btnURL); err != nil {
+				return err
+			}
+		}
+	}
+
+	// No buttons at all — fall back to text
+	if len(replyButtons) == 0 && len(ctaButtons) == 0 {
 		return a.sendAndSaveTextMessage(account, contact, bodyText)
 	}
 
-	// Determine interactive type based on button count
-	interactiveType := "button"
-	if len(waButtons) > 3 {
-		interactiveType = "list"
-	}
-
-	ctx := context.Background()
-	_, err := a.SendOutgoingMessage(ctx, OutgoingMessageRequest{
-		Account:         account,
-		Contact:         contact,
-		Type:            models.MessageTypeInteractive,
-		InteractiveType: interactiveType,
-		BodyText:        bodyText,
-		Buttons:         waButtons,
-	}, ChatbotSendOptions())
-	return err
+	return nil
 }
 
 // sendAndSaveCTAURLButton sends a CTA URL button message and saves it to the database
@@ -657,34 +712,6 @@ func (a *App) sendAndSaveFlowMessage(account *models.WhatsAppAccount, contact *m
 	return err
 }
 
-// getOrCreateContact finds or creates a contact for the phone number
-// Returns the contact and a boolean indicating if the contact was newly created
-func (a *App) getOrCreateContact(orgID uuid.UUID, phoneNumber, profileName string) (*models.Contact, bool) {
-	var contact models.Contact
-	result := a.DB.Where("organization_id = ? AND phone_number = ?", orgID, phoneNumber).First(&contact)
-	if result.Error == nil {
-		// Update profile name if changed
-		if profileName != "" && contact.ProfileName != profileName {
-			a.DB.Model(&contact).Update("profile_name", profileName)
-		}
-		return &contact, false
-	}
-
-	// Create new contact
-	contact = models.Contact{
-		BaseModel:      models.BaseModel{ID: uuid.New()},
-		OrganizationID: orgID,
-		PhoneNumber:    phoneNumber,
-		ProfileName:    profileName,
-	}
-	if err := a.DB.Create(&contact).Error; err != nil {
-		a.Log.Error("Failed to create contact", "error", err)
-		// Try to fetch again in case of race condition
-		a.DB.Where("organization_id = ? AND phone_number = ?", orgID, phoneNumber).First(&contact)
-		return &contact, false
-	}
-	return &contact, true
-}
 
 // getOrCreateSession finds an active session or creates a new one
 // Returns the session and a boolean indicating if it's a new session
@@ -1116,8 +1143,7 @@ func (a *App) sendFlowCompletionWebhook(flow *models.ChatbotFlow, session *model
 	}
 
 	// Make the request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.HTTPClient.Do(req)
 	if err != nil {
 		a.Log.Error("Webhook request failed", "error", err, "url", webhookURL)
 		return
@@ -1347,51 +1373,14 @@ func (a *App) sendStepMessage(account *models.WhatsAppAccount, session *models.C
 		// Send interactive buttons message
 		message = processTemplate(step.Message, session.SessionData)
 		if len(step.Buttons) > 0 {
-			// Separate reply buttons from URL buttons
-			// WhatsApp doesn't allow mixing them in the same message
-			replyButtons := make([]map[string]interface{}, 0)
-			urlButtons := make([]map[string]interface{}, 0)
-
+			buttons := make([]map[string]interface{}, 0, len(step.Buttons))
 			for _, btn := range step.Buttons {
 				if btnMap, ok := btn.(map[string]interface{}); ok {
-					btnType, _ := btnMap["type"].(string)
-					if btnType == "url" {
-						urlButtons = append(urlButtons, btnMap)
-					} else {
-						// Default to reply button
-						replyButtons = append(replyButtons, btnMap)
-					}
+					buttons = append(buttons, btnMap)
 				}
 			}
-
-			// Send reply buttons first (with the main message)
-			if len(replyButtons) > 0 {
-				if err := a.sendAndSaveInteractiveButtons(account, contact, message, replyButtons); err != nil {
-					a.Log.Error("Failed to send reply buttons", "error", err, "contact", contact.PhoneNumber)
-				}
-			} else if len(urlButtons) == 0 {
-				// No buttons at all, fall back to text
-				if err := a.sendAndSaveTextMessage(account, contact, message); err != nil {
-					a.Log.Error("Failed to send text message", "error", err, "contact", contact.PhoneNumber)
-				}
-			}
-
-			// Send URL buttons as separate CTA URL messages
-			// WhatsApp only allows one CTA URL button per message
-			for _, urlBtn := range urlButtons {
-				btnTitle, _ := urlBtn["title"].(string)
-				btnURL, _ := urlBtn["url"].(string)
-				if btnTitle != "" && btnURL != "" {
-					// Use empty body for subsequent URL buttons, or use message if no reply buttons
-					bodyText := ""
-					if len(replyButtons) == 0 {
-						bodyText = message
-						message = "" // Clear so we don't repeat it
-					}
-					if err := a.sendAndSaveCTAURLButton(account, contact, bodyText, btnTitle, btnURL); err != nil {
-						a.Log.Error("Failed to send CTA URL button", "error", err, "contact", contact.PhoneNumber)
-					}
-				}
+			if err := a.sendAndSaveInteractiveButtons(account, contact, message, buttons); err != nil {
+				a.Log.Error("Failed to send buttons", "error", err, "contact", contact.PhoneNumber)
 			}
 		} else {
 			// No buttons configured, fall back to text
@@ -1571,8 +1560,7 @@ func (a *App) fetchApiResponse(apiConfig models.JSONB, sessionData models.JSONB,
 	}
 
 	// Make the request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.HTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("API request failed: %w", err)
 	}
@@ -1787,8 +1775,7 @@ func (a *App) fetchAPIContext(apiConfig models.JSONB, session *models.ChatbotSes
 	}
 
 	// Make the request
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.HTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("API request failed: %w", err)
 	}
@@ -1886,8 +1873,7 @@ func (a *App) generateOpenAIResponse(settings *models.ChatbotSettings, session *
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+settings.AI.APIKey)
 
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.HTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("request failed: %w", err)
 	}
@@ -1990,8 +1976,7 @@ func (a *App) generateAnthropicResponse(settings *models.ChatbotSettings, sessio
 	req.Header.Set("x-api-key", settings.AI.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.HTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("request failed: %w", err)
 	}
@@ -2103,8 +2088,7 @@ func (a *App) generateGoogleResponse(settings *models.ChatbotSettings, session *
 
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.HTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("request failed: %w", err)
 	}
@@ -2200,7 +2184,7 @@ func (a *App) handleIncomingReaction(account *models.WhatsAppAccount, fromPhone,
 	}
 
 	// Get or create contact
-	contact, _ := a.getOrCreateContact(account.OrganizationID, fromPhone, profileName)
+	contact, _, _ := contactutil.GetOrCreateContact(a.DB, account.OrganizationID, fromPhone, profileName)
 
 	// Parse existing reactions from Metadata
 	var metadata map[string]interface{}
@@ -2337,6 +2321,7 @@ func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *mode
 		"last_message_preview": preview,
 		"is_read":              false,
 		"whats_app_account":    account.Name,
+		"last_inbound_at":      now,
 	})
 
 	a.Log.Info("Saved incoming message", "message_id", message.ID, "contact_id", contact.ID, "media_url", message.MediaURL)
@@ -2347,11 +2332,15 @@ func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *mode
 		if contact.AssignedUserID != nil {
 			assignedUserIDStr = contact.AssignedUserID.String()
 		}
+		profileName := contact.ProfileName
+		if a.ShouldMaskPhoneNumbers(account.OrganizationID) {
+			profileName = MaskIfPhoneNumber(profileName)
+		}
 		wsPayload := map[string]any{
 			"id":               message.ID.String(),
 			"contact_id":       contact.ID.String(),
 			"assigned_user_id": assignedUserIDStr,
-			"profile_name":     contact.ProfileName,
+			"profile_name":     profileName,
 			"direction":        message.Direction,
 			"message_type":     message.MessageType,
 			"content":          map[string]string{"body": message.Content},

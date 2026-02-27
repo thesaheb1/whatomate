@@ -63,7 +63,7 @@ type SyncCatalogsRequest struct {
 
 // ListCatalogs returns all catalogs for the organization
 func (a *App) ListCatalogs(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
@@ -96,14 +96,14 @@ func (a *App) ListCatalogs(r *fastglue.Request) error {
 
 // CreateCatalog creates a new catalog in Meta and stores it locally
 func (a *App) CreateCatalog(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
 	var req CatalogRequest
-	if err := r.Decode(&req, "json"); err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid request body", nil, "")
+	if err := a.decodeRequest(r, &req); err != nil {
+		return nil
 	}
 
 	if req.Name == "" || req.WhatsAppAccount == "" {
@@ -111,19 +111,19 @@ func (a *App) CreateCatalog(r *fastglue.Request) error {
 	}
 
 	// Get WhatsApp account
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("organization_id = ? AND name = ?", orgID, req.WhatsAppAccount).First(&account).Error; err != nil {
+	account, err := a.resolveWhatsAppAccount(orgID, req.WhatsAppAccount)
+	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "WhatsApp account not found", nil, "")
 	}
 
 	// Create catalog in Meta
 	ctx := context.Background()
-	waAccount := a.toWhatsAppAccount(&account)
+	waAccount := a.toWhatsAppAccount(account)
 
 	metaCatalogID, err := a.WhatsApp.CreateCatalog(ctx, waAccount, req.Name)
 	if err != nil {
 		a.Log.Error("Failed to create catalog in Meta", "error", err)
-		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create catalog: "+err.Error(), nil, "")
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create catalog", nil, "")
 	}
 
 	// Store catalog locally
@@ -145,15 +145,14 @@ func (a *App) CreateCatalog(r *fastglue.Request) error {
 
 // GetCatalog returns a single catalog with its products
 func (a *App) GetCatalog(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr, _ := r.RequestCtx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "catalog")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid ID", nil, "")
+		return nil
 	}
 
 	var catalog models.Catalog
@@ -173,31 +172,30 @@ func (a *App) GetCatalog(r *fastglue.Request) error {
 
 // DeleteCatalog deletes a catalog from Meta and locally
 func (a *App) DeleteCatalog(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr, _ := r.RequestCtx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "catalog")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid ID", nil, "")
+		return nil
 	}
 
-	var catalog models.Catalog
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&catalog).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Catalog not found", nil, "")
+	catalog, err := findByIDAndOrg[models.Catalog](a.DB, r, id, orgID, "Catalog")
+	if err != nil {
+		return nil
 	}
 
 	// Get WhatsApp account
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("organization_id = ? AND name = ?", orgID, catalog.WhatsAppAccount).First(&account).Error; err != nil {
+	account, err := a.resolveWhatsAppAccount(orgID, catalog.WhatsAppAccount)
+	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "WhatsApp account not found", nil, "")
 	}
 
 	// Delete from Meta
 	ctx := context.Background()
-	waAccount := a.toWhatsAppAccount(&account)
+	waAccount := a.toWhatsAppAccount(account)
 
 	if err := a.WhatsApp.DeleteCatalog(ctx, waAccount, catalog.MetaCatalogID); err != nil {
 		a.Log.Error("Failed to delete catalog from Meta", "error", err)
@@ -208,7 +206,7 @@ func (a *App) DeleteCatalog(r *fastglue.Request) error {
 	a.DB.Where("catalog_id = ?", id).Delete(&models.CatalogProduct{})
 
 	// Delete catalog
-	if err := a.DB.Delete(&catalog).Error; err != nil {
+	if err := a.DB.Delete(catalog).Error; err != nil {
 		a.Log.Error("Failed to delete catalog", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to delete catalog", nil, "")
 	}
@@ -218,14 +216,14 @@ func (a *App) DeleteCatalog(r *fastglue.Request) error {
 
 // SyncCatalogs syncs catalogs from Meta API
 func (a *App) SyncCatalogs(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
 	var req SyncCatalogsRequest
-	if err := r.Decode(&req, "json"); err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid request body", nil, "")
+	if err := a.decodeRequest(r, &req); err != nil {
+		return nil
 	}
 
 	if req.WhatsAppAccount == "" {
@@ -233,19 +231,19 @@ func (a *App) SyncCatalogs(r *fastglue.Request) error {
 	}
 
 	// Get WhatsApp account
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("organization_id = ? AND name = ?", orgID, req.WhatsAppAccount).First(&account).Error; err != nil {
+	account, err := a.resolveWhatsAppAccount(orgID, req.WhatsAppAccount)
+	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "WhatsApp account not found", nil, "")
 	}
 
 	// Fetch catalogs from Meta
 	ctx := context.Background()
-	waAccount := a.toWhatsAppAccount(&account)
+	waAccount := a.toWhatsAppAccount(account)
 
 	metaCatalogs, err := a.WhatsApp.ListCatalogs(ctx, waAccount)
 	if err != nil {
 		a.Log.Error("Failed to fetch catalogs from Meta", "error", err)
-		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to fetch catalogs: "+err.Error(), nil, "")
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to fetch catalogs", nil, "")
 	}
 
 	// Sync each catalog
@@ -284,22 +282,22 @@ func (a *App) SyncCatalogs(r *fastglue.Request) error {
 
 // ListCatalogProducts returns all products in a catalog
 func (a *App) ListCatalogProducts(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr, _ := r.RequestCtx.UserValue("id").(string)
-	catalogID, err := uuid.Parse(idStr)
+	catalogID, err := parsePathUUID(r, "id", "catalog")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid catalog ID", nil, "")
+		return nil
 	}
 
 	// Verify catalog belongs to org
-	var catalog models.Catalog
-	if err := a.DB.Where("id = ? AND organization_id = ?", catalogID, orgID).First(&catalog).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Catalog not found", nil, "")
+	catalog, err := findByIDAndOrg[models.Catalog](a.DB, r, catalogID, orgID, "Catalog")
+	if err != nil {
+		return nil
 	}
+	_ = catalog
 
 	var products []models.CatalogProduct
 	if err := a.DB.Where("catalog_id = ?", catalogID).Order("name ASC").Find(&products).Error; err != nil {
@@ -319,20 +317,19 @@ func (a *App) ListCatalogProducts(r *fastglue.Request) error {
 
 // CreateCatalogProduct creates a new product in a catalog
 func (a *App) CreateCatalogProduct(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr, _ := r.RequestCtx.UserValue("id").(string)
-	catalogID, err := uuid.Parse(idStr)
+	catalogID, err := parsePathUUID(r, "id", "catalog")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid catalog ID", nil, "")
+		return nil
 	}
 
 	var req CatalogProductRequest
-	if err := r.Decode(&req, "json"); err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid request body", nil, "")
+	if err := a.decodeRequest(r, &req); err != nil {
+		return nil
 	}
 
 	if req.Name == "" || req.Price <= 0 {
@@ -340,14 +337,14 @@ func (a *App) CreateCatalogProduct(r *fastglue.Request) error {
 	}
 
 	// Get catalog and verify ownership
-	var catalog models.Catalog
-	if err := a.DB.Where("id = ? AND organization_id = ?", catalogID, orgID).First(&catalog).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Catalog not found", nil, "")
+	catalog, err := findByIDAndOrg[models.Catalog](a.DB, r, catalogID, orgID, "Catalog")
+	if err != nil {
+		return nil
 	}
 
 	// Get WhatsApp account
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("organization_id = ? AND name = ?", orgID, catalog.WhatsAppAccount).First(&account).Error; err != nil {
+	account, err := a.resolveWhatsAppAccount(orgID, catalog.WhatsAppAccount)
+	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "WhatsApp account not found", nil, "")
 	}
 
@@ -358,7 +355,7 @@ func (a *App) CreateCatalogProduct(r *fastglue.Request) error {
 
 	// Create product in Meta
 	ctx := context.Background()
-	waAccount := a.toWhatsAppAccount(&account)
+	waAccount := a.toWhatsAppAccount(account)
 
 	productInput := &whatsapp.ProductInput{
 		Name:        req.Name,
@@ -373,7 +370,7 @@ func (a *App) CreateCatalogProduct(r *fastglue.Request) error {
 	metaProductID, err := a.WhatsApp.CreateProduct(ctx, waAccount, catalog.MetaCatalogID, productInput)
 	if err != nil {
 		a.Log.Error("Failed to create product in Meta", "error", err)
-		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create product: "+err.Error(), nil, "")
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create product", nil, "")
 	}
 
 	// Store product locally
@@ -401,46 +398,44 @@ func (a *App) CreateCatalogProduct(r *fastglue.Request) error {
 
 // GetCatalogProduct returns a single product
 func (a *App) GetCatalogProduct(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr, _ := r.RequestCtx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "product")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid product ID", nil, "")
+		return nil
 	}
 
-	var product models.CatalogProduct
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&product).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Product not found", nil, "")
+	product, err := findByIDAndOrg[models.CatalogProduct](a.DB, r, id, orgID, "Product")
+	if err != nil {
+		return nil
 	}
 
-	return r.SendEnvelope(productToResponse(product))
+	return r.SendEnvelope(productToResponse(*product))
 }
 
 // UpdateCatalogProduct updates a product
 func (a *App) UpdateCatalogProduct(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr, _ := r.RequestCtx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "product")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid product ID", nil, "")
+		return nil
 	}
 
-	var product models.CatalogProduct
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&product).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Product not found", nil, "")
+	product, err := findByIDAndOrg[models.CatalogProduct](a.DB, r, id, orgID, "Product")
+	if err != nil {
+		return nil
 	}
 
 	var req CatalogProductRequest
-	if err := r.Decode(&req, "json"); err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid request body", nil, "")
+	if err := a.decodeRequest(r, &req); err != nil {
+		return nil
 	}
 
 	// Get catalog to get WhatsApp account
@@ -450,14 +445,14 @@ func (a *App) UpdateCatalogProduct(r *fastglue.Request) error {
 	}
 
 	// Get WhatsApp account
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("organization_id = ? AND name = ?", orgID, catalog.WhatsAppAccount).First(&account).Error; err != nil {
+	account, err := a.resolveWhatsAppAccount(orgID, catalog.WhatsAppAccount)
+	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "WhatsApp account not found", nil, "")
 	}
 
 	// Update product in Meta
 	ctx := context.Background()
-	waAccount := a.toWhatsAppAccount(&account)
+	waAccount := a.toWhatsAppAccount(account)
 
 	productInput := &whatsapp.ProductInput{
 		Name:        req.Name,
@@ -470,7 +465,7 @@ func (a *App) UpdateCatalogProduct(r *fastglue.Request) error {
 
 	if err := a.WhatsApp.UpdateProduct(ctx, waAccount, product.MetaProductID, productInput); err != nil {
 		a.Log.Error("Failed to update product in Meta", "error", err)
-		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update product: "+err.Error(), nil, "")
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update product", nil, "")
 	}
 
 	// Update locally
@@ -496,30 +491,29 @@ func (a *App) UpdateCatalogProduct(r *fastglue.Request) error {
 		product.RetailerID = req.RetailerID
 	}
 
-	if err := a.DB.Save(&product).Error; err != nil {
+	if err := a.DB.Save(product).Error; err != nil {
 		a.Log.Error("Failed to save product", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to save product", nil, "")
 	}
 
-	return r.SendEnvelope(productToResponse(product))
+	return r.SendEnvelope(productToResponse(*product))
 }
 
 // DeleteCatalogProduct deletes a product
 func (a *App) DeleteCatalogProduct(r *fastglue.Request) error {
-	orgID, err := getOrganizationID(r)
+	orgID, err := a.getOrgID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	idStr, _ := r.RequestCtx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
+	id, err := parsePathUUID(r, "id", "product")
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid product ID", nil, "")
+		return nil
 	}
 
-	var product models.CatalogProduct
-	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&product).Error; err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Product not found", nil, "")
+	product, err := findByIDAndOrg[models.CatalogProduct](a.DB, r, id, orgID, "Product")
+	if err != nil {
+		return nil
 	}
 
 	// Get catalog to get WhatsApp account
@@ -529,21 +523,21 @@ func (a *App) DeleteCatalogProduct(r *fastglue.Request) error {
 	}
 
 	// Get WhatsApp account
-	var account models.WhatsAppAccount
-	if err := a.DB.Where("organization_id = ? AND name = ?", orgID, catalog.WhatsAppAccount).First(&account).Error; err != nil {
+	account, err := a.resolveWhatsAppAccount(orgID, catalog.WhatsAppAccount)
+	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "WhatsApp account not found", nil, "")
 	}
 
 	// Delete from Meta
 	ctx := context.Background()
-	waAccount := a.toWhatsAppAccount(&account)
+	waAccount := a.toWhatsAppAccount(account)
 
 	if err := a.WhatsApp.DeleteProduct(ctx, waAccount, product.MetaProductID); err != nil {
 		a.Log.Error("Failed to delete product from Meta", "error", err)
 		// Continue with local deletion
 	}
 
-	if err := a.DB.Delete(&product).Error; err != nil {
+	if err := a.DB.Delete(product).Error; err != nil {
 		a.Log.Error("Failed to delete product", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to delete product", nil, "")
 	}

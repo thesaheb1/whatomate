@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { ref, onMounted, watch, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -8,366 +9,248 @@ import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { PageHeader, SearchInput, CrudFormDialog, DeleteConfirmDialog, DataTable, type Column } from '@/components/shared'
 import { cannedResponsesService, type CannedResponse } from '@/services/api'
+import { useCrudState } from '@/composables/useCrudState'
 import { toast } from 'vue-sonner'
-import {
-  Plus,
-  Search,
-  MessageSquareText,
-  Pencil,
-  Trash2,
-  Loader2,
-  Copy
-} from 'lucide-vue-next'
+import { Plus, MessageSquareText, Pencil, Trash2, Copy } from 'lucide-vue-next'
+import { getErrorMessage } from '@/lib/api-utils'
+import { CANNED_RESPONSE_CATEGORIES, getLabelFromValue } from '@/lib/constants'
+import { useDebounceFn } from '@vueuse/core'
+
+const { t } = useI18n()
+
+interface CannedResponseFormData {
+  name: string
+  shortcut: string
+  content: string
+  category: string
+  is_active: boolean
+}
+
+const defaultFormData: CannedResponseFormData = { name: '', shortcut: '', content: '', category: '', is_active: true }
 
 const cannedResponses = ref<CannedResponse[]>([])
-const isLoading = ref(true)
+const isLoading = ref(false)
+const {
+  isSubmitting, isDialogOpen, editingItem: editingResponse, deleteDialogOpen, itemToDelete: responseToDelete,
+  formData, openCreateDialog, openEditDialog: baseOpenEditDialog, openDeleteDialog, closeDialog, closeDeleteDialog,
+} = useCrudState<CannedResponse, CannedResponseFormData>(defaultFormData)
 const searchQuery = ref('')
-const selectedCategory = ref<string>('all')
+const selectedCategory = ref('all')
 
-// Dialog state
-const isDialogOpen = ref(false)
-const isSubmitting = ref(false)
-const editingResponse = ref<CannedResponse | null>(null)
-const deleteDialogOpen = ref(false)
-const responseToDelete = ref<CannedResponse | null>(null)
+// Pagination state
+const currentPage = ref(1)
+const totalItems = ref(0)
+const pageSize = 20
 
-const formData = ref({
-  name: '',
-  shortcut: '',
-  content: '',
-  category: '',
-  is_active: true
-})
+const columns = computed<Column<CannedResponse>[]>(() => [
+  { key: 'name', label: t('cannedResponses.name'), sortable: true },
+  { key: 'category', label: t('cannedResponses.category'), sortable: true },
+  { key: 'content', label: t('cannedResponses.content') },
+  { key: 'usage_count', label: t('cannedResponses.used'), sortable: true },
+  { key: 'status', label: t('cannedResponses.status'), sortable: true, sortKey: 'is_active' },
+  { key: 'actions', label: t('common.actions'), align: 'right' },
+])
 
-const categories = [
-  { value: 'greeting', label: 'Greetings' },
-  { value: 'support', label: 'Support' },
-  { value: 'sales', label: 'Sales' },
-  { value: 'closing', label: 'Closing' },
-  { value: 'general', label: 'General' },
-]
+const sortKey = ref('name')
+const sortDirection = ref<'asc' | 'desc'>('asc')
 
-onMounted(async () => {
-  await fetchCannedResponses()
-})
-
-async function fetchCannedResponses() {
+async function fetchItems() {
   isLoading.value = true
   try {
-    const params: any = {}
-    if (selectedCategory.value && selectedCategory.value !== 'all') {
-      params.category = selectedCategory.value
-    }
-    if (searchQuery.value) {
-      params.search = searchQuery.value
-    }
-    const response = await cannedResponsesService.list(params)
-    cannedResponses.value = response.data.data?.canned_responses || []
-  } catch (error: any) {
-    toast.error('Failed to load canned responses')
-    cannedResponses.value = []
+    const response = await cannedResponsesService.list({
+      search: searchQuery.value || undefined,
+      category: selectedCategory.value !== 'all' ? selectedCategory.value : undefined,
+      page: currentPage.value,
+      limit: pageSize
+    })
+    const data = (response.data as any).data || response.data
+    cannedResponses.value = data.canned_responses || []
+    totalItems.value = data.total ?? cannedResponses.value.length
+  } catch (error) {
+    toast.error(getErrorMessage(error, t('common.failedLoad', { resource: t('resources.cannedResponses') })))
   } finally {
     isLoading.value = false
   }
 }
 
-function openCreateDialog() {
-  editingResponse.value = null
-  formData.value = {
-    name: '',
-    shortcut: '',
-    content: '',
-    category: '',
-    is_active: true
-  }
-  isDialogOpen.value = true
+// Debounced search
+const debouncedSearch = useDebounceFn(() => {
+  currentPage.value = 1
+  fetchItems()
+}, 300)
+
+watch(searchQuery, () => debouncedSearch())
+watch(selectedCategory, () => {
+  currentPage.value = 1
+  fetchItems()
+})
+
+function handlePageChange(page: number) {
+  currentPage.value = page
+  fetchItems()
 }
 
 function openEditDialog(response: CannedResponse) {
-  editingResponse.value = response
-  formData.value = {
-    name: response.name,
-    shortcut: response.shortcut || '',
-    content: response.content,
-    category: response.category || '',
-    is_active: response.is_active
-  }
-  isDialogOpen.value = true
+  baseOpenEditDialog(response, (r) => ({
+    name: r.name, shortcut: r.shortcut || '', content: r.content, category: r.category || '', is_active: r.is_active
+  }))
 }
 
-async function saveResponse() {
-  if (!formData.value.name.trim() || !formData.value.content.trim()) {
-    toast.error('Name and content are required')
-    return
-  }
+onMounted(() => fetchItems())
 
+async function saveResponse() {
+  if (!formData.value.name.trim() || !formData.value.content.trim()) { toast.error(t('cannedResponses.nameContentRequired')); return }
   isSubmitting.value = true
   try {
     if (editingResponse.value) {
       await cannedResponsesService.update(editingResponse.value.id, formData.value)
-      toast.success('Canned response updated')
+      toast.success(t('common.updatedSuccess', { resource: t('resources.CannedResponse') }))
     } else {
       await cannedResponsesService.create(formData.value)
-      toast.success('Canned response created')
+      toast.success(t('common.createdSuccess', { resource: t('resources.CannedResponse') }))
     }
-    isDialogOpen.value = false
-    await fetchCannedResponses()
-  } catch (error: any) {
-    const message = error.response?.data?.message || 'Failed to save'
-    toast.error(message)
+    closeDialog()
+    await fetchItems()
+  } catch (error) {
+    toast.error(getErrorMessage(error, t('common.failedSave', { resource: t('resources.cannedResponse') })))
   } finally {
     isSubmitting.value = false
   }
-}
-
-function openDeleteDialog(response: CannedResponse) {
-  responseToDelete.value = response
-  deleteDialogOpen.value = true
 }
 
 async function confirmDelete() {
   if (!responseToDelete.value) return
   try {
     await cannedResponsesService.delete(responseToDelete.value.id)
-    toast.success('Canned response deleted')
-    deleteDialogOpen.value = false
-    responseToDelete.value = null
-    await fetchCannedResponses()
-  } catch (error: any) {
-    toast.error('Failed to delete')
+    toast.success(t('common.deletedSuccess', { resource: t('resources.CannedResponse') }))
+    closeDeleteDialog()
+    await fetchItems()
+  } catch (error) {
+    toast.error(getErrorMessage(error, t('common.failedDelete', { resource: t('resources.cannedResponse') })))
   }
 }
 
-function copyToClipboard(content: string) {
-  navigator.clipboard.writeText(content)
-  toast.success('Copied to clipboard')
-}
-
-const filteredResponses = computed(() => {
-  return cannedResponses.value
-})
-
-function getCategoryLabel(category: string): string {
-  return categories.find(c => c.value === category)?.label || category || 'Uncategorized'
-}
+function copyToClipboard(content: string) { navigator.clipboard.writeText(content); toast.success(t('common.copiedToClipboard')) }
+function getCategoryLabel(category: string): string { return getLabelFromValue(CANNED_RESPONSE_CATEGORIES, category) || t('cannedResponses.uncategorized') }
 </script>
 
 <template>
-  <div class="flex flex-col h-full">
-    <!-- Header -->
-    <header class="border-b bg-background/95 backdrop-blur">
-      <div class="flex h-16 items-center px-6">
-        <MessageSquareText class="h-5 w-5 mr-3" />
-        <div class="flex-1">
-          <h1 class="text-xl font-semibold">Canned Responses</h1>
-          <p class="text-sm text-muted-foreground">Pre-defined responses for quick messaging</p>
-        </div>
-        <Button variant="outline" size="sm" @click="openCreateDialog">
-          <Plus class="h-4 w-4 mr-2" />
-          Add Response
-        </Button>
-      </div>
-    </header>
+  <div class="flex flex-col h-full bg-[#0a0a0b] light:bg-gray-50">
+    <PageHeader :title="$t('cannedResponses.title')" :subtitle="$t('cannedResponses.subtitle')" :icon="MessageSquareText" icon-gradient="bg-gradient-to-br from-teal-500 to-emerald-600 shadow-teal-500/20">
+      <template #actions>
+        <Button variant="outline" size="sm" @click="openCreateDialog"><Plus class="h-4 w-4 mr-2" />{{ $t('cannedResponses.addResponse') }}</Button>
+      </template>
+    </PageHeader>
 
-    <!-- Filters -->
-    <div class="p-4 border-b flex items-center gap-4 flex-wrap">
-      <div class="flex items-center gap-2">
-        <Label class="text-sm text-muted-foreground">Category:</Label>
-        <Select v-model="selectedCategory" @update:model-value="fetchCannedResponses">
-          <SelectTrigger class="w-[150px]">
-            <SelectValue placeholder="All" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Categories</SelectItem>
-            <SelectItem v-for="cat in categories" :key="cat.value" :value="cat.value">
-              {{ cat.label }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-      <div class="relative flex-1 max-w-md">
-        <Search class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-        <Input
-          v-model="searchQuery"
-          placeholder="Search responses..."
-          class="pl-9"
-          @input="fetchCannedResponses"
-        />
-      </div>
-    </div>
-
-    <!-- Loading -->
-    <div v-if="isLoading" class="flex-1 flex items-center justify-center">
-      <Loader2 class="h-8 w-8 animate-spin text-muted-foreground" />
-    </div>
-
-    <!-- Responses Grid -->
-    <ScrollArea v-else class="flex-1">
-      <div class="p-6 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-        <Card v-for="response in filteredResponses" :key="response.id" class="flex flex-col">
-          <CardHeader class="pb-3">
-            <div class="flex items-start justify-between">
-              <div class="flex-1 min-w-0">
-                <CardTitle class="text-base truncate">{{ response.name }}</CardTitle>
-                <div class="flex items-center gap-2 mt-2">
-                  <Badge variant="outline" class="text-xs">
-                    {{ getCategoryLabel(response.category) }}
-                  </Badge>
-                  <span v-if="response.shortcut" class="text-xs font-mono text-muted-foreground">
-                    /{{ response.shortcut }}
-                  </span>
+    <ScrollArea class="flex-1">
+      <div class="p-6">
+        <div class="max-w-6xl mx-auto">
+          <Card>
+            <CardHeader>
+              <div class="flex items-center justify-between flex-wrap gap-4">
+                <div>
+                  <CardTitle>{{ $t('cannedResponses.yourResponses') }}</CardTitle>
+                  <CardDescription>{{ $t('cannedResponses.yourResponsesDesc') }}</CardDescription>
+                </div>
+                <div class="flex items-center gap-2">
+                  <Select v-model="selectedCategory">
+                    <SelectTrigger class="w-[150px]"><SelectValue :placeholder="$t('common.all')" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">{{ $t('cannedResponses.allCategories') }}</SelectItem>
+                      <SelectItem v-for="cat in CANNED_RESPONSE_CATEGORIES" :key="cat.value" :value="cat.value">{{ cat.label }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <SearchInput v-model="searchQuery" :placeholder="$t('cannedResponses.searchResponses') + '...'" class="w-64" />
                 </div>
               </div>
-              <Badge v-if="!response.is_active" variant="secondary" class="ml-2">
-                Inactive
-              </Badge>
-            </div>
-          </CardHeader>
-          <CardContent class="flex-1">
-            <p class="text-sm text-muted-foreground line-clamp-3 whitespace-pre-wrap">
-              {{ response.content }}
-            </p>
-            <p class="text-xs text-muted-foreground mt-2">
-              Used {{ response.usage_count }} times
-            </p>
-          </CardContent>
-          <div class="px-6 pb-4 flex items-center gap-1 border-t pt-3">
-            <Button variant="ghost" size="sm" @click="copyToClipboard(response.content)">
-              <Copy class="h-4 w-4" />
-            </Button>
-            <Button variant="ghost" size="sm" @click="openEditDialog(response)">
-              <Pencil class="h-4 w-4" />
-            </Button>
-            <Button variant="ghost" size="sm" @click="openDeleteDialog(response)">
-              <Trash2 class="h-4 w-4 text-destructive" />
-            </Button>
-          </div>
-        </Card>
-
-        <!-- Empty State -->
-        <Card v-if="filteredResponses.length === 0" class="col-span-full">
-          <CardContent class="py-12 text-center text-muted-foreground">
-            <MessageSquareText class="h-12 w-12 mx-auto mb-4 opacity-50" />
-            <p class="text-lg font-medium">No canned responses found</p>
-            <p class="text-sm mb-4">Create your first canned response to get started.</p>
-            <Button variant="outline" size="sm" @click="openCreateDialog">
-              <Plus class="h-4 w-4 mr-2" />
-              Add Response
-            </Button>
-          </CardContent>
-        </Card>
+            </CardHeader>
+            <CardContent>
+              <DataTable
+                :items="cannedResponses"
+                :columns="columns"
+                :is-loading="isLoading"
+                :empty-icon="MessageSquareText"
+                :empty-title="$t('cannedResponses.noResponsesFound')"
+                :empty-description="$t('cannedResponses.noResponsesFoundDesc')"
+                v-model:sort-key="sortKey"
+                v-model:sort-direction="sortDirection"
+                server-pagination
+                :current-page="currentPage"
+                :total-items="totalItems"
+                :page-size="pageSize"
+                item-name="responses"
+                @page-change="handlePageChange"
+              >
+                <template #cell-name="{ item: response }">
+                  <div>
+                    <span class="font-medium">{{ response.name }}</span>
+                    <p v-if="response.shortcut" class="text-xs font-mono text-muted-foreground">/{{ response.shortcut }}</p>
+                  </div>
+                </template>
+                <template #cell-category="{ item: response }">
+                  <Badge variant="outline" class="text-xs">{{ getCategoryLabel(response.category) }}</Badge>
+                </template>
+                <template #cell-content="{ item: response }">
+                  <p class="text-sm text-muted-foreground max-w-[300px] truncate">{{ response.content }}</p>
+                </template>
+                <template #cell-usage_count="{ item: response }">
+                  <span class="text-muted-foreground">{{ response.usage_count }}</span>
+                </template>
+                <template #cell-status="{ item: response }">
+                  <Badge v-if="response.is_active" class="bg-emerald-500/20 text-emerald-400 border-transparent text-xs">{{ $t('common.active') }}</Badge>
+                  <Badge v-else variant="secondary" class="text-xs">{{ $t('common.inactive') }}</Badge>
+                </template>
+                <template #cell-actions="{ item: response }">
+                  <div class="flex items-center justify-end gap-1">
+                    <Button variant="ghost" size="icon" class="h-8 w-8" @click="copyToClipboard(response.content)" title="Copy">
+                      <Copy class="h-4 w-4" />
+                    </Button>
+                    <Button variant="ghost" size="icon" class="h-8 w-8" @click="openEditDialog(response)" title="Edit">
+                      <Pencil class="h-4 w-4" />
+                    </Button>
+                    <Button variant="ghost" size="icon" class="h-8 w-8 text-destructive" @click="openDeleteDialog(response)" title="Delete">
+                      <Trash2 class="h-4 w-4" />
+                    </Button>
+                  </div>
+                </template>
+                <template #empty-action>
+                  <Button variant="outline" size="sm" @click="openCreateDialog">
+                    <Plus class="h-4 w-4 mr-2" />{{ $t('cannedResponses.addResponse') }}
+                  </Button>
+                </template>
+              </DataTable>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     </ScrollArea>
 
-    <!-- Create/Edit Dialog -->
-    <Dialog v-model:open="isDialogOpen">
-      <DialogContent class="max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{{ editingResponse ? 'Edit' : 'Create' }} Canned Response</DialogTitle>
-          <DialogDescription>
-            {{ editingResponse ? 'Update the response details.' : 'Add a new quick response.' }}
-          </DialogDescription>
-        </DialogHeader>
-
-        <div class="space-y-4 py-4">
+    <CrudFormDialog v-model:open="isDialogOpen" :is-editing="!!editingResponse" :is-submitting="isSubmitting" :edit-title="$t('cannedResponses.editTitle')" :create-title="$t('cannedResponses.createTitle')" :edit-description="$t('cannedResponses.editDesc')" :create-description="$t('cannedResponses.createDesc')" max-width="max-w-lg" @submit="saveResponse">
+      <div class="space-y-4">
+        <div class="space-y-2"><Label>{{ $t('cannedResponses.name') }} <span class="text-destructive">*</span></Label><Input v-model="formData.name" placeholder="Welcome Message" /></div>
+        <div class="grid grid-cols-2 gap-4">
           <div class="space-y-2">
-            <Label>Name <span class="text-destructive">*</span></Label>
-            <Input v-model="formData.name" placeholder="Welcome Message" />
+            <Label>{{ $t('cannedResponses.shortcut') }}</Label>
+            <div class="relative"><span class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">/</span><Input v-model="formData.shortcut" placeholder="welcome" class="pl-7" /></div>
+            <p class="text-xs text-muted-foreground">{{ $t('cannedResponses.shortcutHint') }}</p>
           </div>
-
-          <div class="grid grid-cols-2 gap-4">
-            <div class="space-y-2">
-              <Label>Shortcut</Label>
-              <div class="relative">
-                <span class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">/</span>
-                <Input v-model="formData.shortcut" placeholder="welcome" class="pl-7" />
-              </div>
-              <p class="text-xs text-muted-foreground">Type /welcome to quickly find</p>
-            </div>
-
-            <div class="space-y-2">
-              <Label>Category</Label>
-              <Select v-model="formData.category">
-                <SelectTrigger>
-                  <SelectValue placeholder="Select category" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="cat in categories" :key="cat.value" :value="cat.value">
-                    {{ cat.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
           <div class="space-y-2">
-            <Label>Content <span class="text-destructive">*</span></Label>
-            <Textarea
-              v-model="formData.content"
-              placeholder="Hello {{contact_name}}! Thank you for reaching out. How can I help you today?"
-              rows="5"
-            />
-            <p class="text-xs text-muted-foreground">
-              Placeholders: <code class="bg-muted px-1 rounded" v-pre>{{contact_name}}</code> for name, <code class="bg-muted px-1 rounded" v-pre>{{phone_number}}</code> for phone
-            </p>
-          </div>
-
-          <div class="flex items-center justify-between" v-if="editingResponse">
-            <Label>Active</Label>
-            <Switch v-model:checked="formData.is_active" />
+            <Label>{{ $t('cannedResponses.category') }}</Label>
+            <Select v-model="formData.category"><SelectTrigger><SelectValue :placeholder="$t('cannedResponses.category')" /></SelectTrigger><SelectContent><SelectItem v-for="cat in CANNED_RESPONSE_CATEGORIES" :key="cat.value" :value="cat.value">{{ cat.label }}</SelectItem></SelectContent></Select>
           </div>
         </div>
+        <div class="space-y-2">
+          <Label>{{ $t('cannedResponses.content') }} <span class="text-destructive">*</span></Label>
+          <Textarea v-model="formData.content" :placeholder="$t('cannedResponses.contentPlaceholder')" :rows="5" />
+          <p class="text-xs text-muted-foreground">{{ $t('cannedResponses.placeholderHint') }}</p>
+        </div>
+        <div v-if="editingResponse" class="flex items-center justify-between"><Label>{{ $t('common.active') }}</Label><Switch v-model:checked="formData.is_active" /></div>
+      </div>
+    </CrudFormDialog>
 
-        <DialogFooter>
-          <Button variant="outline" @click="isDialogOpen = false">Cancel</Button>
-          <Button @click="saveResponse" :disabled="isSubmitting">
-            <Loader2 v-if="isSubmitting" class="h-4 w-4 mr-2 animate-spin" />
-            {{ editingResponse ? 'Update' : 'Create' }}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-
-    <!-- Delete Dialog -->
-    <AlertDialog v-model:open="deleteDialogOpen">
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Delete Canned Response</AlertDialogTitle>
-          <AlertDialogDescription>
-            Are you sure you want to delete "{{ responseToDelete?.name }}"?
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction @click="confirmDelete">Delete</AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+    <DeleteConfirmDialog v-model:open="deleteDialogOpen" :title="$t('cannedResponses.deleteTitle')" :item-name="responseToDelete?.name" @confirm="confirmDelete" />
   </div>
 </template>

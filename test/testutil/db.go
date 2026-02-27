@@ -81,7 +81,10 @@ func runMigrations(db *gorm.DB) error {
 	return db.AutoMigrate(
 		// Core models
 		&models.Organization{},
+		&models.Permission{},
+		&models.CustomRole{},
 		&models.User{},
+		&models.UserOrganization{},
 		&models.Team{},
 		&models.TeamMember{},
 		&models.APIKey{},
@@ -92,6 +95,7 @@ func runMigrations(db *gorm.DB) error {
 		// WhatsApp models
 		&models.WhatsAppAccount{},
 		&models.Contact{},
+		&models.Tag{},
 		&models.Message{},
 		&models.Template{},
 		&models.WhatsAppFlow{},
@@ -108,6 +112,13 @@ func runMigrations(db *gorm.DB) error {
 		&models.BulkMessageCampaign{},
 		&models.BulkMessageRecipient{},
 		&models.NotificationRule{},
+		// Catalog models
+		&models.Catalog{},
+		&models.CatalogProduct{},
+		// Canned responses
+		&models.CannedResponse{},
+		// Dashboard
+		&models.Widget{},
 	)
 }
 
@@ -115,6 +126,13 @@ func runMigrations(db *gorm.DB) error {
 // Uses TRUNCATE CASCADE to handle foreign key constraints properly.
 func cleanupTables(db *gorm.DB) {
 	tables := []string{
+		// Dashboard tables
+		"widgets",
+		// Catalog tables
+		"catalog_products",
+		"catalogs",
+		// Canned responses
+		"canned_responses",
 		// Bulk message tables
 		"bulk_message_recipients",
 		"bulk_message_campaigns",
@@ -130,10 +148,15 @@ func cleanupTables(db *gorm.DB) {
 		"agent_transfers",
 		// WhatsApp tables
 		"messages",
+		"tags",
 		"contacts",
 		"templates",
 		"whatsapp_flows",
 		"whatsapp_accounts",
+		// Roles and permissions
+		"role_permissions",
+		"custom_roles",
+		"permissions",
 		// Core tables
 		"team_members",
 		"teams",
@@ -142,6 +165,7 @@ func cleanupTables(db *gorm.DB) {
 		"webhooks",
 		"custom_actions",
 		"user_availability_logs",
+		"user_organizations",
 		"users",
 		"organizations",
 	}
@@ -154,6 +178,10 @@ func cleanupTables(db *gorm.DB) {
 // TruncateTables truncates all tables (PostgreSQL only, faster than DELETE).
 func TruncateTables(db *gorm.DB) {
 	tables := []string{
+		"widgets",
+		"catalog_products",
+		"catalogs",
+		"canned_responses",
 		"bulk_message_recipients",
 		"bulk_message_campaigns",
 		"notification_rules",
@@ -166,10 +194,14 @@ func TruncateTables(db *gorm.DB) {
 		"ai_contexts",
 		"agent_transfers",
 		"messages",
+		"tags",
 		"contacts",
 		"templates",
 		"whatsapp_flows",
 		"whatsapp_accounts",
+		"role_permissions",
+		"custom_roles",
+		"permissions",
 		"team_members",
 		"teams",
 		"api_keys",
@@ -177,6 +209,7 @@ func TruncateTables(db *gorm.DB) {
 		"webhooks",
 		"custom_actions",
 		"user_availability_logs",
+		"user_organizations",
 		"users",
 		"organizations",
 	}

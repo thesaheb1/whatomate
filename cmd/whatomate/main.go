@@ -4,17 +4,21 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+	"github.com/shridarpatil/whatomate/internal/calling"
 	"github.com/shridarpatil/whatomate/internal/config"
+	"github.com/shridarpatil/whatomate/internal/storage"
+	"github.com/shridarpatil/whatomate/internal/tts"
 	"github.com/shridarpatil/whatomate/internal/database"
 	"github.com/shridarpatil/whatomate/internal/frontend"
 	"github.com/shridarpatil/whatomate/internal/handlers"
 	"github.com/shridarpatil/whatomate/internal/middleware"
-	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/shridarpatil/whatomate/internal/queue"
 	"github.com/shridarpatil/whatomate/internal/websocket"
 	"github.com/shridarpatil/whatomate/internal/worker"
@@ -113,6 +117,19 @@ func runServer(args []string) {
 		lo.Fatal("Failed to load config", "error", err)
 	}
 
+	// Validate JWT secret
+	if cfg.App.Environment == "production" && len(cfg.JWT.Secret) < 32 {
+		lo.Fatal("JWT secret must be at least 32 characters in production")
+	}
+	if cfg.JWT.Secret == "" {
+		lo.Warn("JWT secret is empty, using a random secret (tokens will not persist across restarts)")
+	}
+
+	// Warn if debug mode is on in production
+	if cfg.App.Environment == "production" && cfg.App.Debug {
+		lo.Warn("Debug mode is enabled in production! This may expose sensitive information.")
+	}
+
 	// Set log level based on environment
 	if cfg.App.Environment == "production" {
 		lo = logf.New(logf.Opts{
@@ -131,7 +148,7 @@ func runServer(args []string) {
 
 	// Run migrations if requested
 	if *migrate {
-		if err := database.RunMigrationWithProgress(db); err != nil {
+		if err := database.RunMigrationWithProgress(db, &cfg.DefaultAdmin); err != nil {
 			lo.Fatal("Migration failed", "error", err)
 		}
 	}
@@ -151,7 +168,7 @@ func runServer(args []string) {
 	g := fastglue.NewGlue()
 
 	// Initialize WhatsApp client
-	waClient := whatsapp.New(lo)
+	waClient := whatsapp.NewWithBaseURL(lo, cfg.WhatsApp.BaseURL)
 
 	// Initialize WebSocket hub
 	wsHub := websocket.NewHub(lo)
@@ -159,14 +176,54 @@ func runServer(args []string) {
 	lo.Info("WebSocket hub started")
 
 	// Initialize app with dependencies
+	// Shared HTTP client with connection pooling for external API calls
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			DialContext:         handlers.SSRFSafeDialer(),
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
+
 	app := &handlers.App{
-		Config:   cfg,
-		DB:       db,
-		Redis:    rdb,
-		Log:      lo,
-		WhatsApp: waClient,
-		WSHub:    wsHub,
-		Queue:    jobQueue,
+		Config:     cfg,
+		DB:         db,
+		Redis:      rdb,
+		Log:        lo,
+		WhatsApp:   waClient,
+		WSHub:      wsHub,
+		Queue:      jobQueue,
+		HTTPClient: httpClient,
+	}
+
+	// Initialize S3 client for call recordings (optional)
+	var s3Client *storage.S3Client
+	if cfg.Calling.RecordingEnabled && cfg.Storage.S3Bucket != "" {
+		var err error
+		s3Client, err = storage.NewS3Client(&cfg.Storage)
+		if err != nil {
+			lo.Warn("Failed to initialize S3 client for recordings, recording disabled", "error", err)
+		} else {
+			lo.Info("S3 client initialized for call recordings", "bucket", cfg.Storage.S3Bucket)
+		}
+	}
+
+	// Initialize CallManager (per-org calling_enabled DB setting controls access)
+	app.CallManager = calling.NewManager(&cfg.Calling, s3Client, db, waClient, wsHub, lo)
+	app.S3Client = s3Client
+	lo.Info("Call manager initialized")
+
+	// Initialize TTS if configured (requires piper binary + model)
+	if cfg.TTS.PiperBinary != "" && cfg.TTS.PiperModel != "" {
+		app.TTS = &tts.PiperTTS{
+			BinaryPath:    cfg.TTS.PiperBinary,
+			ModelPath:     cfg.TTS.PiperModel,
+			OpusencBinary: cfg.TTS.OpusencBinary,
+			AudioDir:      cfg.Calling.AudioDir,
+		}
+		lo.Info("TTS initialized", "piper", cfg.TTS.PiperBinary, "model", cfg.TTS.PiperModel)
 	}
 
 	// Start campaign stats subscriber for real-time WebSocket updates from worker
@@ -174,18 +231,24 @@ func runServer(args []string) {
 		lo.Error("Failed to start campaign stats subscriber", "error", err)
 	}
 
+	// Parse allowed origins for CORS
+	allowedOrigins := middleware.ParseAllowedOrigins(cfg.Server.AllowedOrigins)
+
 	// Setup middleware (CORS is handled by corsWrapper at fasthttp level)
+	g.Before(middleware.SecurityHeaders())
 	g.Before(middleware.RequestLogger(lo))
 	g.Before(middleware.Recovery(lo))
+	g.Before(middleware.CSRFProtection())
 
 	// Setup routes
-	setupRoutes(g, app, lo, cfg.Server.BasePath)
+	setupRoutes(g, app, lo, cfg.Server.BasePath, rdb, cfg)
 
 	// Create server with CORS wrapper
 	server := &fasthttp.Server{
-		Handler:      corsWrapper(g.Handler()),
+		Handler:      corsWrapper(g.Handler(), allowedOrigins),
 		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
 		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
+		MaxRequestBodySize: 15 * 1024 * 1024,
 		Name:         "Whatomate",
 	}
 
@@ -372,26 +435,59 @@ func runWorker(args []string) {
 // ROUTES
 // ============================================================================
 
-func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePath string) {
+func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePath string, rdb *redis.Client, cfg *config.Config) {
 	// Health check
 	g.GET("/health", app.HealthCheck)
 	g.GET("/ready", app.ReadyCheck)
 
-	// Auth routes (public)
-	g.POST("/api/auth/login", app.Login)
-	g.POST("/api/auth/register", app.Register)
-	g.POST("/api/auth/refresh", app.RefreshToken)
+	// Auth routes (public, optionally rate-limited)
+	if cfg.RateLimit.Enabled {
+		window := time.Duration(cfg.RateLimit.WindowSeconds) * time.Second
+		lo.Info("Rate limiting enabled on auth endpoints",
+			"login_max", cfg.RateLimit.LoginMaxAttempts,
+			"register_max", cfg.RateLimit.RegisterMaxAttempts,
+			"refresh_max", cfg.RateLimit.RefreshMaxAttempts,
+			"sso_max", cfg.RateLimit.SSOMaxAttempts,
+			"window_seconds", cfg.RateLimit.WindowSeconds)
 
-	// SSO routes (public)
+		g.POST("/api/auth/login", withRateLimit(app.Login, middleware.RateLimitOpts{
+			Redis: rdb, Log: lo, Max: cfg.RateLimit.LoginMaxAttempts, Window: window, KeyPrefix: "login", TrustProxy: cfg.RateLimit.TrustProxy,
+		}))
+		g.POST("/api/auth/register", withRateLimit(app.Register, middleware.RateLimitOpts{
+			Redis: rdb, Log: lo, Max: cfg.RateLimit.RegisterMaxAttempts, Window: window, KeyPrefix: "register", TrustProxy: cfg.RateLimit.TrustProxy,
+		}))
+		g.POST("/api/auth/refresh", withRateLimit(app.RefreshToken, middleware.RateLimitOpts{
+			Redis: rdb, Log: lo, Max: cfg.RateLimit.RefreshMaxAttempts, Window: window, KeyPrefix: "refresh", TrustProxy: cfg.RateLimit.TrustProxy,
+		}))
+	} else {
+		g.POST("/api/auth/login", app.Login)
+		g.POST("/api/auth/register", app.Register)
+		g.POST("/api/auth/refresh", app.RefreshToken)
+	}
+	g.POST("/api/auth/logout", app.Logout)
+	g.POST("/api/auth/switch-org", app.SwitchOrg)
+	g.GET("/api/auth/ws-token", app.GetWSToken)
+
+	// SSO routes (public, optionally rate-limited)
 	g.GET("/api/auth/sso/providers", app.GetPublicSSOProviders)
-	g.GET("/api/auth/sso/{provider}/init", app.InitSSO)
-	g.GET("/api/auth/sso/{provider}/callback", app.CallbackSSO)
+	if cfg.RateLimit.Enabled {
+		window := time.Duration(cfg.RateLimit.WindowSeconds) * time.Second
+		g.GET("/api/auth/sso/{provider}/init", withRateLimit(app.InitSSO, middleware.RateLimitOpts{
+			Redis: rdb, Log: lo, Max: cfg.RateLimit.SSOMaxAttempts, Window: window, KeyPrefix: "sso_init", TrustProxy: cfg.RateLimit.TrustProxy,
+		}))
+		g.GET("/api/auth/sso/{provider}/callback", withRateLimit(app.CallbackSSO, middleware.RateLimitOpts{
+			Redis: rdb, Log: lo, Max: cfg.RateLimit.SSOMaxAttempts, Window: window, KeyPrefix: "sso_callback", TrustProxy: cfg.RateLimit.TrustProxy,
+		}))
+	} else {
+		g.GET("/api/auth/sso/{provider}/init", app.InitSSO)
+		g.GET("/api/auth/sso/{provider}/callback", app.CallbackSSO)
+	}
 
 	// Webhook routes (public - for Meta)
 	g.GET("/api/webhook", app.WebhookVerify)
 	g.POST("/api/webhook", app.WebhookHandler)
 
-	// WebSocket route (auth handled in handler via query param)
+	// WebSocket route (auth via message-based flow after upgrade)
 	g.GET("/ws", app.WebSocketHandler)
 
 	// For protected routes, we'll use a path-based middleware approach
@@ -405,7 +501,7 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 		// Skip auth for public routes
 		if path == "/health" || path == "/ready" ||
 			path == "/api/auth/login" || path == "/api/auth/register" || path == "/api/auth/refresh" ||
-			path == "/api/webhook" || path == "/ws" {
+			path == "/api/auth/logout" || path == "/api/webhook" || path == "/ws" {
 			return r
 		}
 		// Skip auth for SSO routes (they handle their own auth via state tokens)
@@ -432,68 +528,8 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 			return r
 		}
 
-		path := string(r.RequestCtx.Path())
-
-		// Only apply to authenticated API routes
-		if len(path) < 4 || path[:4] != "/api" {
-			return r
-		}
-
-		// Get role from context (set by auth middleware)
-		role, ok := r.RequestCtx.UserValue("role").(models.Role)
-		if !ok {
-			return r // Auth middleware will handle unauthenticated requests
-		}
-
-		// Admin-only routes: user management, API keys, and SSO settings
-		if (len(path) >= 10 && path[:10] == "/api/users") ||
-			(len(path) >= 13 && path[:13] == "/api/api-keys") ||
-			(len(path) >= 17 && path[:17] == "/api/settings/sso") {
-			if role != models.RoleAdmin {
-				r.RequestCtx.SetStatusCode(403)
-				r.RequestCtx.SetBodyString(`{"status":"error","message":"Admin access required"}`)
-				return nil
-			}
-		}
-
-		// Manager+ routes: agents cannot access these
-		if role == models.RoleAgent {
-			// Agent-accessible exceptions under restricted prefixes
-			agentAllowedPaths := []string{
-				"/api/chatbot/transfers",
-				"/api/analytics/agents",
-			}
-
-			isAllowed := false
-			for _, allowed := range agentAllowedPaths {
-				if len(path) >= len(allowed) && path[:len(allowed)] == allowed {
-					isAllowed = true
-					break
-				}
-			}
-
-			if !isAllowed {
-				managerRoutes := []string{
-					"/api/accounts",
-					"/api/templates",
-					"/api/flows",
-					"/api/campaigns",
-					"/api/chatbot",
-					"/api/analytics",
-				}
-				for _, prefix := range managerRoutes {
-					if len(path) >= len(prefix) && path[:len(prefix)] == prefix {
-						r.RequestCtx.SetStatusCode(403)
-						r.RequestCtx.SetBodyString(`{"status":"error","message":"Access denied"}`)
-						return nil
-					}
-				}
-			}
-
-			// Agents can only create contacts, not modify/delete
-			// PUT and DELETE for contacts are allowed if it's their assigned contact (checked in handler)
-		}
-
+		// Route-level permission checks are now handled at the handler level
+		// using the granular permission system (HasPermission checks)
 		return r
 	})
 
@@ -502,6 +538,7 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	g.PUT("/api/me/settings", app.UpdateCurrentUserSettings)
 	g.PUT("/api/me/password", app.ChangePassword)
 	g.PUT("/api/me/availability", app.UpdateAvailability)
+	g.GET("/api/me/organizations", app.ListMyOrganizations)
 
 	// User Management (admin only - enforced by middleware)
 	g.GET("/api/users", app.ListUsers)
@@ -509,6 +546,14 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	g.GET("/api/users/{id}", app.GetUser)
 	g.PUT("/api/users/{id}", app.UpdateUser)
 	g.DELETE("/api/users/{id}", app.DeleteUser)
+
+	// Roles & Permissions (admin only - enforced by middleware)
+	g.GET("/api/roles", app.ListRoles)
+	g.POST("/api/roles", app.CreateRole)
+	g.GET("/api/roles/{id}", app.GetRole)
+	g.PUT("/api/roles/{id}", app.UpdateRole)
+	g.DELETE("/api/roles/{id}", app.DeleteRole)
+	g.GET("/api/permissions", app.ListPermissions)
 
 	// API Keys (admin only - enforced by middleware)
 	g.GET("/api/api-keys", app.ListAPIKeys)
@@ -522,6 +567,10 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	g.PUT("/api/accounts/{id}", app.UpdateAccount)
 	g.DELETE("/api/accounts/{id}", app.DeleteAccount)
 	g.POST("/api/accounts/{id}/test", app.TestAccountConnection)
+	g.POST("/api/accounts/{id}/subscribe", app.SubscribeApp)
+	g.GET("/api/accounts/{id}/business_profile", app.GetBusinessProfile)
+	g.PUT("/api/accounts/{id}/business_profile", app.UpdateBusinessProfile)
+	g.POST("/api/accounts/{id}/business_profile/photo", app.UpdateProfilePicture)
 
 	// Contacts
 	g.GET("/api/contacts", app.ListContacts)
@@ -530,7 +579,20 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	g.PUT("/api/contacts/{id}", app.UpdateContact)
 	g.DELETE("/api/contacts/{id}", app.DeleteContact)
 	g.PUT("/api/contacts/{id}/assign", app.AssignContact)
+	g.PUT("/api/contacts/{id}/tags", app.UpdateContactTags)
 	g.GET("/api/contacts/{id}/session-data", app.GetContactSessionData)
+
+	// Generic Import/Export
+	g.POST("/api/export", app.ExportData)
+	g.POST("/api/import", app.ImportData)
+	g.GET("/api/export/{table}/config", app.GetExportConfig)
+	g.GET("/api/import/{table}/config", app.GetImportConfig)
+
+	// Tags
+	g.GET("/api/tags", app.ListTags)
+	g.POST("/api/tags", app.CreateTag)
+	g.PUT("/api/tags/{name}", app.UpdateTag)
+	g.DELETE("/api/tags/{name}", app.DeleteTag)
 
 	// Messages
 	g.GET("/api/contacts/{id}/messages", app.GetMessages)
@@ -540,6 +602,12 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	g.POST("/api/messages/template", app.SendTemplateMessage)
 	g.POST("/api/messages/media", app.SendMediaMessage)
 	g.PUT("/api/messages/{id}/read", app.MarkMessageRead)
+
+	// Conversation Notes
+	g.GET("/api/contacts/{id}/notes", app.ListConversationNotes)
+	g.POST("/api/contacts/{id}/notes", app.CreateConversationNote)
+	g.PUT("/api/contacts/{id}/notes/{note_id}", app.UpdateConversationNote)
+	g.DELETE("/api/contacts/{id}/notes/{note_id}", app.DeleteConversationNote)
 
 	// Media (serves media files for messages, auth-protected)
 	g.GET("/api/media/{message_id}", app.ServeMedia)
@@ -623,7 +691,7 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	g.DELETE("/api/teams/{id}", app.DeleteTeam)
 	g.GET("/api/teams/{id}/members", app.ListTeamMembers)
 	g.POST("/api/teams/{id}/members", app.AddTeamMember)
-	g.DELETE("/api/teams/{id}/members/{user_id}", app.RemoveTeamMember)
+	g.DELETE("/api/teams/{id}/members/{member_user_id}", app.RemoveTeamMember)
 
 	// Canned Responses
 	g.GET("/api/canned-responses", app.ListCannedResponses)
@@ -645,9 +713,34 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	g.GET("/api/analytics/agents/{id}", app.GetAgentDetails)
 	g.GET("/api/analytics/agents/comparison", app.GetAgentComparison)
 
+	// Meta WhatsApp Analytics
+	g.GET("/api/analytics/meta", app.GetMetaAnalytics)
+	g.GET("/api/analytics/meta/accounts", app.ListMetaAccountsForAnalytics)
+	g.POST("/api/analytics/meta/refresh", app.RefreshMetaAnalyticsCache)
+
+	// Widgets (customizable analytics)
+	g.GET("/api/widgets", app.ListWidgets)
+	g.POST("/api/widgets", app.CreateWidget)
+	g.GET("/api/widgets/data-sources", app.GetWidgetDataSources)
+	g.GET("/api/widgets/data", app.GetAllWidgetsData)
+	g.GET("/api/widgets/{id}", app.GetWidget)
+	g.PUT("/api/widgets/{id}", app.UpdateWidget)
+	g.DELETE("/api/widgets/{id}", app.DeleteWidget)
+	g.GET("/api/widgets/{id}/data", app.GetWidgetData)
+	g.POST("/api/widgets/layout", app.SaveWidgetLayout)
+
 	// Organization Settings
 	g.GET("/api/org/settings", app.GetOrganizationSettings)
 	g.PUT("/api/org/settings", app.UpdateOrganizationSettings)
+
+	// Organizations
+	g.GET("/api/organizations", app.ListOrganizations)
+	g.POST("/api/organizations", app.CreateOrganization)
+	g.GET("/api/organizations/current", app.GetCurrentOrganization)
+	g.GET("/api/organizations/members", app.ListOrganizationMembers)
+	g.POST("/api/organizations/members", app.AddOrganizationMember)
+	g.PUT("/api/organizations/members/{member_id}", app.UpdateOrganizationMemberRole)
+	g.DELETE("/api/organizations/members/{member_id}", app.RemoveOrganizationMember)
 
 	// SSO Settings (admin only - enforced by middleware)
 	g.GET("/api/settings/sso", app.GetSSOSettings)
@@ -670,6 +763,33 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	g.DELETE("/api/custom-actions/{id}", app.DeleteCustomAction)
 	g.POST("/api/custom-actions/{id}/execute", app.ExecuteCustomAction)
 	g.GET("/api/custom-actions/redirect/{token}", app.CustomActionRedirect)
+
+	// IVR Flows
+	g.GET("/api/ivr-flows", app.ListIVRFlows)
+	g.GET("/api/ivr-flows/{id}", app.GetIVRFlow)
+	g.POST("/api/ivr-flows", app.CreateIVRFlow)
+	g.PUT("/api/ivr-flows/{id}", app.UpdateIVRFlow)
+	g.DELETE("/api/ivr-flows/{id}", app.DeleteIVRFlow)
+	g.POST("/api/ivr-flows/audio", app.UploadIVRAudio)
+	g.GET("/api/ivr-flows/audio/{filename}", app.ServeIVRAudio)
+
+	// Call Logs
+	g.GET("/api/call-logs", app.ListCallLogs)
+	g.GET("/api/call-logs/{id}", app.GetCallLog)
+	g.GET("/api/call-logs/{id}/recording", app.GetCallRecording)
+
+	// Call Transfers
+	g.GET("/api/call-transfers", app.ListCallTransfers)
+	g.GET("/api/call-transfers/{id}", app.GetCallTransfer)
+	g.POST("/api/call-transfers/{id}/connect", app.ConnectCallTransfer)
+	g.POST("/api/call-transfers/{id}/hangup", app.HangupCallTransfer)
+
+	// Outgoing Calls
+	g.POST("/api/calls/outgoing", app.InitiateOutgoingCall)
+	g.POST("/api/calls/outgoing/{id}/hangup", app.HangupOutgoingCall)
+	g.POST("/api/calls/permission-request", app.SendCallPermissionRequest)
+	g.GET("/api/calls/permission/{contactId}", app.GetCallPermission)
+	g.GET("/api/calls/ice-servers", app.GetICEServers)
 
 	// Catalogs
 	g.GET("/api/catalogs", app.ListCatalogs)
@@ -703,19 +823,33 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	}
 }
 
-// corsWrapper wraps a handler with CORS support at the fasthttp level
-// This ensures CORS headers are set even for auto-handled OPTIONS requests
-func corsWrapper(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+// withRateLimit wraps a handler with the rate limit middleware.
+func withRateLimit(handler fastglue.FastRequestHandler, opts middleware.RateLimitOpts) fastglue.FastRequestHandler {
+	rl := middleware.RateLimit(opts)
+	return func(r *fastglue.Request) error {
+		if rl(r) == nil {
+			return nil // Rate limited — response already sent.
+		}
+		return handler(r)
+	}
+}
+
+// corsWrapper wraps a handler with CORS support at the fasthttp level.
+// This ensures CORS headers are set even for auto-handled OPTIONS requests.
+func corsWrapper(next fasthttp.RequestHandler, allowedOrigins map[string]bool) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
 		origin := string(ctx.Request.Header.Peek("Origin"))
-		if origin == "" {
-			origin = "*"
+
+		if origin != "" && middleware.IsOriginAllowed(origin, allowedOrigins) {
+			ctx.Response.Header.Set("Access-Control-Allow-Origin", origin)
+			ctx.Response.Header.Set("Access-Control-Allow-Credentials", "true")
+		} else if len(allowedOrigins) == 0 && origin != "" {
+			// Development: no whitelist configured
+			ctx.Response.Header.Set("Access-Control-Allow-Origin", origin)
 		}
 
-		ctx.Response.Header.Set("Access-Control-Allow-Origin", origin)
 		ctx.Response.Header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
-		ctx.Response.Header.Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Requested-With")
-		ctx.Response.Header.Set("Access-Control-Allow-Credentials", "true")
+		ctx.Response.Header.Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Organization-ID, X-CSRF-Token")
 		ctx.Response.Header.Set("Access-Control-Max-Age", "86400")
 
 		// Handle preflight OPTIONS requests

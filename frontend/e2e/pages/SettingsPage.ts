@@ -14,7 +14,8 @@ export class CardGridPage extends BasePage {
 
   constructor(page: Page, options: { headingText: string; addButtonText: string }) {
     super(page)
-    this.heading = page.locator('h1').filter({ hasText: options.headingText })
+    // Use first() to handle multiple headings (PageHeader + CardTitle)
+    this.heading = page.locator('h1').filter({ hasText: options.headingText }).first()
     this.addButton = page.getByRole('button', { name: new RegExp(options.addButtonText, 'i') }).first()
     this.searchInput = page.locator('input[placeholder*="Search"]')
     this.categoryFilter = page.locator('button[role="combobox"]').first()
@@ -118,14 +119,17 @@ export class CardGridPage extends BasePage {
 export class TableSettingsPage extends BasePage {
   readonly heading: Locator
   readonly addButton: Locator
+  readonly searchInput: Locator
   readonly table: Locator
   readonly dialog: Locator
   readonly alertDialog: Locator
 
   constructor(page: Page, options: { headingText: string; addButtonText: string }) {
     super(page)
-    this.heading = page.locator('h1').filter({ hasText: options.headingText })
-    this.addButton = page.getByRole('button', { name: new RegExp(options.addButtonText, 'i') })
+    // Use first() to handle multiple headings and buttons (PageHeader + CardTitle + empty state)
+    this.heading = page.locator('h1').filter({ hasText: options.headingText }).first()
+    this.addButton = page.getByRole('button', { name: new RegExp(options.addButtonText, 'i') }).first()
+    this.searchInput = page.locator('input[placeholder*="Search"]')
     this.table = page.locator('table')
     this.dialog = page.locator('[role="dialog"][data-state="open"]')
     this.alertDialog = page.locator('[role="alertdialog"]')
@@ -134,6 +138,11 @@ export class TableSettingsPage extends BasePage {
   async openCreateDialog() {
     await this.addButton.click()
     await this.dialog.waitFor({ state: 'visible' })
+  }
+
+  async search(term: string) {
+    await this.searchInput.fill(term)
+    await this.page.waitForTimeout(300)
   }
 
   // Table helpers
@@ -230,14 +239,44 @@ export class TableSettingsPage extends BasePage {
   async expectRowNotExists(text: string) {
     await expect(this.table).not.toContainText(text)
   }
+
+  // Sorting helpers
+  getColumnHeader(columnName: string): Locator {
+    return this.page.locator('thead th').filter({ hasText: columnName })
+  }
+
+  async clickColumnHeader(columnName: string) {
+    await this.getColumnHeader(columnName).click()
+    await this.page.waitForTimeout(300)
+  }
+
+  async getSortDirection(columnName: string): Promise<'asc' | 'desc' | null> {
+    const header = this.getColumnHeader(columnName)
+    // Lucide icons render with class like 'lucide-arrow-up-icon'
+    const arrowUp = header.locator('.lucide-arrow-up-icon')
+    const arrowDown = header.locator('.lucide-arrow-down-icon')
+
+    if (await arrowUp.count() > 0) return 'asc'
+    if (await arrowDown.count() > 0) return 'desc'
+    return null
+  }
+
+  async expectSortDirection(columnName: string, direction: 'asc' | 'desc') {
+    const actual = await this.getSortDirection(columnName)
+    expect(actual).toBe(direction)
+  }
 }
 
 /**
- * Canned Responses Page
+ * Canned Responses Page (DataTable-based)
  */
-export class CannedResponsesPage extends CardGridPage {
+export class CannedResponsesPage extends TableSettingsPage {
+  readonly categoryFilter: Locator
+
   constructor(page: Page) {
     super(page, { headingText: 'Canned Responses', addButtonText: 'Add Response' })
+    // Category filter is now the second combobox (after search)
+    this.categoryFilter = page.locator('button[role="combobox"]').first()
   }
 
   async goto() {
@@ -245,27 +284,72 @@ export class CannedResponsesPage extends CardGridPage {
     await this.page.waitForLoadState('networkidle')
   }
 
+  async search(term: string) {
+    await this.searchInput.fill(term)
+    await this.page.waitForTimeout(300)
+  }
+
+  async filterByCategory(category: string) {
+    await this.categoryFilter.click()
+    await this.page.locator('[role="option"]').filter({ hasText: category }).click()
+    await this.page.waitForTimeout(300)
+  }
+
   async fillResponseForm(name: string, content: string, shortcut?: string, category?: string) {
-    await this.getDialogInput(0).fill(name)
+    await this.dialog.locator('input').first().fill(name)
     if (shortcut) {
-      await this.getDialogInput(1).fill(shortcut)
+      await this.dialog.locator('input').nth(1).fill(shortcut)
     }
-    await this.getDialogTextarea().fill(content)
+    await this.dialog.locator('textarea').fill(content)
     if (category) {
-      await this.getDialogCombobox().click()
+      await this.dialog.locator('button[role="combobox"]').click()
       await this.page.locator('[role="option"]').filter({ hasText: category }).click()
     }
   }
 
-  // Card buttons: 0=copy, 1=edit, 2=delete
+  // Table helpers - buttons in order: copy, edit, delete
+  getResponseRow(name: string): Locator {
+    return this.page.locator('tbody tr').filter({ hasText: name })
+  }
+
+  async copyResponse(name: string) {
+    const row = this.getResponseRow(name)
+    await expect(row).toBeVisible({ timeout: 10000 })
+    // Copy is first button in actions column
+    await row.locator('td:last-child button').first().click()
+  }
+
   async editResponse(name: string) {
-    await this.clickCardButton(name, 1)
+    const row = this.getResponseRow(name)
+    await expect(row).toBeVisible({ timeout: 10000 })
+    // Edit is second button in actions column
+    await row.locator('td:last-child button').nth(1).click()
     await this.dialog.waitFor({ state: 'visible' })
   }
 
   async deleteResponse(name: string) {
-    await this.clickCardButton(name, 2)
+    const row = this.getResponseRow(name)
+    await expect(row).toBeVisible({ timeout: 10000 })
+    // Delete is third button in actions column
+    await row.locator('td:last-child button').nth(2).click()
     await this.alertDialog.waitFor({ state: 'visible' })
+  }
+
+  async expectResponseExists(name: string) {
+    await expect(this.getResponseRow(name)).toBeVisible()
+  }
+
+  async expectResponseNotExists(name: string) {
+    await expect(this.getResponseRow(name)).not.toBeVisible()
+  }
+
+  // Dialog helpers for tests
+  getDialogInput(index: number): Locator {
+    return this.dialog.locator('input').nth(index)
+  }
+
+  getDialogTextarea(): Locator {
+    return this.dialog.locator('textarea')
   }
 }
 
@@ -333,5 +417,173 @@ export class ApiKeysPage extends TableSettingsPage {
 
   async closeKeyCreatedDialog() {
     await this.page.getByRole('button', { name: 'Done' }).click()
+  }
+}
+
+/**
+ * Tags Page
+ */
+export class TagsPage extends TableSettingsPage {
+  readonly colorSelect: Locator
+
+  constructor(page: Page) {
+    super(page, { headingText: 'Tags', addButtonText: 'Add Tag' })
+    this.colorSelect = page.locator('button[role="combobox"]')
+  }
+
+  async goto() {
+    await this.page.goto('/settings/tags')
+    await this.page.waitForLoadState('networkidle')
+  }
+
+  async fillTagForm(name: string, color?: string) {
+    await this.dialog.locator('input').first().fill(name)
+    if (color) {
+      await this.dialog.locator('button[role="combobox"]').click()
+      await this.page.locator('[role="option"]').filter({ hasText: color }).click()
+    }
+  }
+
+  async selectColor(color: string) {
+    await this.dialog.locator('button[role="combobox"]').click()
+    await this.page.locator('[role="option"]').filter({ hasText: color }).click()
+  }
+
+  async expectTagBadgeVisible(name: string) {
+    await expect(this.page.locator('span').filter({ hasText: name })).toBeVisible()
+  }
+}
+
+/**
+ * Contacts Page
+ */
+export class ContactsPage extends TableSettingsPage {
+  readonly importExportButton: Locator
+  readonly importExportDialog: Locator
+
+  constructor(page: Page) {
+    super(page, { headingText: 'Contacts', addButtonText: 'Add Contact' })
+    this.importExportButton = page.getByRole('button', { name: /Import.*Export/i })
+    this.importExportDialog = page.locator('[role="dialog"][data-state="open"]')
+  }
+
+  async goto() {
+    await this.page.goto('/settings/contacts')
+    await this.page.waitForLoadState('networkidle')
+  }
+
+  // Contact form helpers
+  async fillContactForm(phoneNumber: string, name?: string, account?: string) {
+    await this.dialog.locator('input').first().fill(phoneNumber)
+    if (name) {
+      await this.dialog.locator('input').nth(1).fill(name)
+    }
+    if (account) {
+      await this.dialog.locator('button[role="combobox"]').first().click()
+      await this.page.locator('[role="option"]').filter({ hasText: account }).click()
+    }
+  }
+
+  async fillEditForm(name?: string) {
+    if (name) {
+      // In edit mode, phone is disabled, name is second input
+      await this.dialog.locator('input').nth(1).fill(name)
+    }
+  }
+
+  // Tag selection in form
+  async selectTags(tags: string[]) {
+    // Open tag selector popover
+    const tagButton = this.dialog.locator('button[role="combobox"]').last()
+    await tagButton.click()
+
+    for (const tag of tags) {
+      await this.page.locator('[role="option"]').filter({ hasText: tag }).click()
+    }
+
+    // Close by clicking outside
+    await this.dialog.locator('h2').click()
+  }
+
+  // Table helpers - buttons in order: chat, edit, delete
+  getContactRow(identifier: string): Locator {
+    return this.page.locator('tbody tr').filter({ hasText: identifier })
+  }
+
+  async openChat(identifier: string) {
+    const row = this.getContactRow(identifier)
+    await expect(row).toBeVisible({ timeout: 10000 })
+    // Chat is first button in actions column
+    await row.locator('td:last-child button').first().click()
+  }
+
+  async editContact(identifier: string) {
+    const row = this.getContactRow(identifier)
+    await expect(row).toBeVisible({ timeout: 10000 })
+    // Edit is second button in actions column
+    await row.locator('td:last-child button').nth(1).click()
+    await this.dialog.waitFor({ state: 'visible' })
+  }
+
+  async deleteContact(identifier: string) {
+    const row = this.getContactRow(identifier)
+    await expect(row).toBeVisible({ timeout: 10000 })
+    // Delete is third button in actions column
+    await row.locator('td:last-child button').nth(2).click()
+    await this.alertDialog.waitFor({ state: 'visible' })
+  }
+
+  async expectContactExists(identifier: string) {
+    await expect(this.getContactRow(identifier)).toBeVisible()
+  }
+
+  async expectContactNotExists(identifier: string) {
+    await expect(this.getContactRow(identifier)).not.toBeVisible()
+  }
+
+  // Import/Export helpers
+  async openImportExportDialog() {
+    await this.importExportButton.click()
+    await this.importExportDialog.waitFor({ state: 'visible' })
+  }
+
+  async switchToImportTab() {
+    await this.importExportDialog.getByRole('tab', { name: /Import/i }).click()
+  }
+
+  async switchToExportTab() {
+    await this.importExportDialog.getByRole('tab', { name: /Export/i }).click()
+  }
+
+  async selectExportColumn(columnName: string) {
+    await this.importExportDialog.locator('label').filter({ hasText: columnName }).click()
+  }
+
+  async clickExportButton() {
+    await this.importExportDialog.getByRole('button', { name: /Export CSV/i }).click()
+  }
+
+  async uploadImportFile(filePath: string) {
+    await this.importExportDialog.locator('input[type="file"]').setInputFiles(filePath)
+  }
+
+  async toggleUpdateOnDuplicate() {
+    await this.importExportDialog.locator('button[role="checkbox"]').click()
+  }
+
+  async clickImportButton() {
+    await this.importExportDialog.getByRole('button', { name: /Import CSV/i }).click()
+    // Wait for import to complete - look for "Import Complete" text
+    await this.importExportDialog.locator('text=Import Complete').waitFor({ state: 'visible', timeout: 30000 })
+  }
+
+  async expectImportResult(created: number, updated: number) {
+    await expect(this.importExportDialog).toContainText(`Created: ${created}`, { timeout: 10000 })
+    await expect(this.importExportDialog).toContainText(`Updated: ${updated}`, { timeout: 10000 })
+  }
+
+  async closeImportExportDialog() {
+    await this.importExportDialog.getByRole('button', { name: /Cancel/i }).click()
+    await this.importExportDialog.waitFor({ state: 'hidden' })
   }
 }

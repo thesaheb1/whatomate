@@ -14,8 +14,10 @@ export class KeywordsPage extends BasePage {
 
   constructor(page: Page) {
     super(page)
-    this.heading = page.getByRole('heading', { name: 'Keyword Rules' })
-    this.addButton = page.getByRole('button', { name: /Add Rule/i })
+    // Use first() to handle multiple headings (PageHeader + CardTitle)
+    this.heading = page.getByRole('heading', { name: 'Keyword Rules' }).first()
+    // Use first() since there may be button in both PageHeader and empty state
+    this.addButton = page.getByRole('button', { name: /Add Rule/i }).first()
     this.searchInput = page.locator('input[placeholder*="Search"]')
     this.dialog = page.locator('[role="dialog"][data-state="open"]')
     this.alertDialog = page.locator('[role="alertdialog"]')
@@ -77,7 +79,14 @@ export class KeywordsPage extends BasePage {
     const labelLocator = this.dialog.locator('label').filter({ hasText: label })
     const trigger = labelLocator.locator('..').locator('button[role="combobox"]')
     await trigger.click()
-    await this.page.locator('[role="option"]').filter({ hasText: value }).click()
+    // Wait for dropdown to appear
+    await this.page.locator('[role="listbox"]').waitFor({ state: 'visible', timeout: 5000 })
+    const option = this.page.locator('[role="option"]').filter({ hasText: value })
+    await option.click()
+    // Wait for dropdown to close and dialog to still be open
+    await this.page.locator('[role="listbox"]').waitFor({ state: 'hidden', timeout: 5000 })
+    // Verify dialog is still open
+    await this.dialog.waitFor({ state: 'visible', timeout: 5000 })
   }
 
   async submitDialog(buttonText = 'Create') {
@@ -89,40 +98,42 @@ export class KeywordsPage extends BasePage {
     await this.dialog.waitFor({ state: 'hidden' })
   }
 
-  // Card helpers
+  // Table helpers (DataTable-based view)
   getRuleCard(keyword: string): Locator {
-    return this.page.locator('.rounded-lg.border').filter({ hasText: keyword })
+    // Now uses DataTable - find the row containing the keyword
+    return this.page.locator('tbody tr').filter({ hasText: keyword })
   }
 
-  getEditButton(card?: Locator): Locator {
-    const container = card || this.page
-    // Edit is the first icon button in the actions area
-    return container.locator('.flex.items-center.gap-2.ml-4 button').first()
+  getEditButton(row?: Locator): Locator {
+    const container = row || this.page.locator('tbody tr').first()
+    // Edit button is the first button in actions column
+    return container.locator('td:last-child button').first()
   }
 
-  getDeleteButton(card?: Locator): Locator {
-    const container = card || this.page
-    // Delete is the second icon button in the actions area
-    return container.locator('.flex.items-center.gap-2.ml-4 button').nth(1)
+  getDeleteButton(row?: Locator): Locator {
+    const container = row || this.page.locator('tbody tr').first()
+    // Delete button is the second button in actions column
+    return container.locator('td:last-child button').nth(1)
   }
 
   async editRule(keyword: string) {
-    const card = this.getRuleCard(keyword)
-    await expect(card).toBeVisible({ timeout: 10000 })
-    await this.getEditButton(card).click()
+    const row = this.getRuleCard(keyword)
+    await expect(row).toBeVisible({ timeout: 10000 })
+    await this.getEditButton(row).click()
     await this.dialog.waitFor({ state: 'visible' })
   }
 
   async deleteRule(keyword: string) {
-    const card = this.getRuleCard(keyword)
-    await expect(card).toBeVisible({ timeout: 10000 })
-    await this.getDeleteButton(card).click()
+    const row = this.getRuleCard(keyword)
+    await expect(row).toBeVisible({ timeout: 10000 })
+    await this.getDeleteButton(row).click()
     await this.alertDialog.waitFor({ state: 'visible' })
   }
 
   async search(term: string) {
     await this.searchInput.fill(term)
-    await this.page.waitForTimeout(300)
+    // Wait for debounce (300ms) + API response + render
+    await this.page.waitForTimeout(500)
   }
 
   // Alert dialog actions
@@ -147,9 +158,16 @@ export class KeywordsPage extends BasePage {
     const toast = text
       ? this.page.locator('[data-sonner-toast]').filter({ hasText: text })
       : this.page.locator('[data-sonner-toast]').first()
-    if (await toast.isVisible()) {
-      await toast.click()
+    // Wait for toast to disappear (either by clicking or auto-dismiss)
+    try {
+      if (await toast.isVisible({ timeout: 1000 }).catch(() => false)) {
+        await toast.click({ timeout: 1000 }).catch(() => {})
+      }
+    } catch {
+      // Toast already dismissed, ignore
     }
+    // Wait for toast to be fully hidden
+    await toast.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {})
   }
 
   // Assertions
@@ -179,19 +197,23 @@ export class KeywordsPage extends BasePage {
 }
 
 /**
- * AI Contexts Page - Chatbot AI contexts management
+ * AI Contexts Page - Chatbot AI contexts management (DataTable-based)
  */
 export class AIContextsPage extends BasePage {
   readonly heading: Locator
   readonly addButton: Locator
+  readonly searchInput: Locator
   readonly dialog: Locator
   readonly alertDialog: Locator
   readonly backButton: Locator
 
   constructor(page: Page) {
     super(page)
-    this.heading = page.getByRole('heading', { name: 'AI Contexts' })
-    this.addButton = page.getByRole('button', { name: /Add Context/i })
+    // Use first() to handle multiple headings (PageHeader + CardTitle)
+    this.heading = page.getByRole('heading', { name: 'AI Contexts' }).first()
+    // Use first() since there may be button in both PageHeader and empty state
+    this.addButton = page.getByRole('button', { name: /Add Context/i }).first()
+    this.searchInput = page.locator('input[placeholder*="Search"]')
     this.dialog = page.locator('[role="dialog"][data-state="open"]')
     this.alertDialog = page.locator('[role="alertdialog"]')
     this.backButton = page.locator('a[href="/chatbot"] button').first()
@@ -203,8 +225,12 @@ export class AIContextsPage extends BasePage {
   }
 
   async openCreateDialog() {
+    // Wait for page to be ready and button to be actionable
+    await this.page.waitForLoadState('domcontentloaded')
+    await this.addButton.waitFor({ state: 'visible', timeout: 10000 })
+    await expect(this.addButton).toBeEnabled()
     await this.addButton.click()
-    await this.dialog.waitFor({ state: 'visible' })
+    await this.dialog.waitFor({ state: 'visible', timeout: 10000 })
   }
 
   // Form helpers
@@ -251,6 +277,8 @@ export class AIContextsPage extends BasePage {
 
     // Select API type
     await this.selectOption('Type', 'API Fetch')
+    // Wait for API fields to render after type selection (longer timeout for production)
+    await this.dialog.locator('input#api_url').waitFor({ state: 'visible', timeout: 10000 })
 
     if (options.triggerKeywords) {
       await this.dialog.locator('input#trigger_keywords').fill(options.triggerKeywords)
@@ -292,7 +320,14 @@ export class AIContextsPage extends BasePage {
     const labelLocator = this.dialog.locator('label').filter({ hasText: label })
     const trigger = labelLocator.locator('..').locator('button[role="combobox"]')
     await trigger.click()
-    await this.page.locator('[role="option"]').filter({ hasText: value }).click()
+    // Wait for dropdown to appear
+    await this.page.locator('[role="listbox"]').waitFor({ state: 'visible', timeout: 5000 })
+    const option = this.page.locator('[role="option"]').filter({ hasText: value })
+    await option.click()
+    // Wait for dropdown to close and dialog to still be open
+    await this.page.locator('[role="listbox"]').waitFor({ state: 'hidden', timeout: 5000 })
+    // Verify dialog is still open
+    await this.dialog.waitFor({ state: 'visible', timeout: 5000 })
   }
 
   async submitDialog(buttonText = 'Create') {
@@ -304,35 +339,42 @@ export class AIContextsPage extends BasePage {
     await this.dialog.waitFor({ state: 'hidden' })
   }
 
-  // Card helpers
-  getContextCard(name: string): Locator {
-    return this.page.locator('.rounded-lg.border').filter({ hasText: name })
+  // Table helpers (DataTable-based view)
+  getContextRow(name: string): Locator {
+    // Now uses DataTable - find the row containing the context name
+    return this.page.locator('tbody tr').filter({ hasText: name })
   }
 
-  getEditButton(card?: Locator): Locator {
-    const container = card || this.page
-    // Edit is the first icon button in the actions area
-    return container.locator('.flex.gap-2 button').first()
+  getEditButton(row?: Locator): Locator {
+    const container = row || this.page.locator('tbody tr').first()
+    // Edit button is the first button in actions column
+    return container.locator('td:last-child button').first()
   }
 
-  getDeleteButton(card?: Locator): Locator {
-    const container = card || this.page
-    // Delete is the second icon button in the actions area
-    return container.locator('.flex.gap-2 button').nth(1)
+  getDeleteButton(row?: Locator): Locator {
+    const container = row || this.page.locator('tbody tr').first()
+    // Delete button is the second button in actions column
+    return container.locator('td:last-child button').nth(1)
   }
 
   async editContext(name: string) {
-    const card = this.getContextCard(name)
-    await expect(card).toBeVisible({ timeout: 10000 })
-    await this.getEditButton(card).click()
+    const row = this.getContextRow(name)
+    await expect(row).toBeVisible({ timeout: 10000 })
+    await this.getEditButton(row).click()
     await this.dialog.waitFor({ state: 'visible' })
   }
 
   async deleteContext(name: string) {
-    const card = this.getContextCard(name)
-    await expect(card).toBeVisible({ timeout: 10000 })
-    await this.getDeleteButton(card).click()
+    const row = this.getContextRow(name)
+    await expect(row).toBeVisible({ timeout: 10000 })
+    await this.getDeleteButton(row).click()
     await this.alertDialog.waitFor({ state: 'visible' })
+  }
+
+  async search(term: string) {
+    await this.searchInput.fill(term)
+    // Wait for debounce (300ms) + API response + render
+    await this.page.waitForTimeout(500)
   }
 
   // Alert dialog actions
@@ -357,9 +399,16 @@ export class AIContextsPage extends BasePage {
     const toast = text
       ? this.page.locator('[data-sonner-toast]').filter({ hasText: text })
       : this.page.locator('[data-sonner-toast]').first()
-    if (await toast.isVisible()) {
-      await toast.click()
+    // Wait for toast to disappear (either by clicking or auto-dismiss)
+    try {
+      if (await toast.isVisible({ timeout: 1000 }).catch(() => false)) {
+        await toast.click({ timeout: 1000 }).catch(() => {})
+      }
+    } catch {
+      // Toast already dismissed, ignore
     }
+    // Wait for toast to be fully hidden
+    await toast.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {})
   }
 
   // Assertions
@@ -376,11 +425,15 @@ export class AIContextsPage extends BasePage {
   }
 
   async expectContextExists(name: string) {
-    await expect(this.getContextCard(name)).toBeVisible()
+    // Search for the context to handle pagination
+    await this.search(name)
+    await expect(this.getContextRow(name)).toBeVisible()
   }
 
   async expectContextNotExists(name: string) {
-    await expect(this.getContextCard(name)).not.toBeVisible()
+    // Search for the context to verify it doesn't exist
+    await this.search(name)
+    await expect(this.getContextRow(name)).not.toBeVisible()
   }
 
   async expectEmptyState() {

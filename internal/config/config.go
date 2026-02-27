@@ -11,28 +11,61 @@ import (
 
 // Config holds all configuration for the application
 type Config struct {
-	App      AppConfig      `koanf:"app"`
-	Server   ServerConfig   `koanf:"server"`
-	Database DatabaseConfig `koanf:"database"`
-	Redis    RedisConfig    `koanf:"redis"`
-	JWT      JWTConfig      `koanf:"jwt"`
-	WhatsApp WhatsAppConfig `koanf:"whatsapp"`
-	AI       AIConfig       `koanf:"ai"`
-	Storage  StorageConfig  `koanf:"storage"`
+	App           AppConfig           `koanf:"app"`
+	Server        ServerConfig        `koanf:"server"`
+	Database      DatabaseConfig      `koanf:"database"`
+	Redis         RedisConfig         `koanf:"redis"`
+	JWT           JWTConfig           `koanf:"jwt"`
+	WhatsApp      WhatsAppConfig      `koanf:"whatsapp"`
+	AI            AIConfig            `koanf:"ai"`
+	Storage       StorageConfig       `koanf:"storage"`
+	DefaultAdmin  DefaultAdminConfig  `koanf:"default_admin"`
+	RateLimit     RateLimitConfig     `koanf:"rate_limit"`
+	Cookie        CookieConfig        `koanf:"cookie"`
+	Calling       CallingConfig       `koanf:"calling"`
+	TTS           TTSConfig           `koanf:"tts"`
+}
+
+type TTSConfig struct {
+	PiperBinary   string `koanf:"piper_binary"`   // path to piper executable
+	PiperModel    string `koanf:"piper_model"`    // path to .onnx voice model
+	OpusencBinary string `koanf:"opusenc_binary"` // path to opusenc (defaults to "opusenc")
+}
+
+type ICEServerConfig struct {
+	URLs       []string `koanf:"urls"`
+	Username   string   `koanf:"username"`
+	Credential string   `koanf:"credential"`
+}
+
+type CallingConfig struct {
+	MaxCallDuration     int              `koanf:"max_call_duration"`
+	AudioDir            string           `koanf:"audio_dir"`
+	HoldMusicFile       string           `koanf:"hold_music_file"`
+	TransferTimeoutSecs int              `koanf:"transfer_timeout_secs"`
+	RingbackFile        string           `koanf:"ringback_file"`
+	UDPPortMin          uint16           `koanf:"udp_port_min"`  // WebRTC UDP port range start (default: 10000)
+	UDPPortMax          uint16           `koanf:"udp_port_max"`  // WebRTC UDP port range end (default: 10100)
+	PublicIP            string           `koanf:"public_ip"`     // Public IP for NAT mapping (required on AWS/cloud)
+	RelayOnly           bool             `koanf:"relay_only"`    // Force all media through TURN relay (no direct UDP)
+	ICEServers          []ICEServerConfig `koanf:"ice_servers"`
+	RecordingEnabled    bool             `koanf:"recording_enabled"` // Enable call recording to S3
 }
 
 type AppConfig struct {
-	Name        string `koanf:"name"`
-	Environment string `koanf:"environment"` // development, staging, production
-	Debug       bool   `koanf:"debug"`
+	Name          string `koanf:"name"`
+	Environment   string `koanf:"environment"` // development, staging, production
+	Debug         bool   `koanf:"debug"`
+	EncryptionKey string `koanf:"encryption_key"` // AES-256 key for encrypting secrets at rest
 }
 
 type ServerConfig struct {
-	Host         string `koanf:"host"`
-	Port         int    `koanf:"port"`
-	ReadTimeout  int    `koanf:"read_timeout"`
-	WriteTimeout int    `koanf:"write_timeout"`
-	BasePath     string `koanf:"base_path"` // Base path for frontend (e.g., "/whatomate" for proxy pass)
+	Host           string `koanf:"host"`
+	Port           int    `koanf:"port"`
+	ReadTimeout    int    `koanf:"read_timeout"`
+	WriteTimeout   int    `koanf:"write_timeout"`
+	BasePath       string `koanf:"base_path"`       // Base path for frontend (e.g., "/whatomate" for proxy pass)
+	AllowedOrigins string `koanf:"allowed_origins"`  // Comma-separated list of allowed CORS origins
 }
 
 type DatabaseConfig struct {
@@ -79,6 +112,27 @@ type StorageConfig struct {
 	S3Region  string `koanf:"s3_region"`
 	S3Key     string `koanf:"s3_key"`
 	S3Secret  string `koanf:"s3_secret"`
+}
+
+type DefaultAdminConfig struct {
+	Email    string `koanf:"email"`
+	Password string `koanf:"password"`
+	FullName string `koanf:"full_name"`
+}
+
+type CookieConfig struct {
+	Domain string `koanf:"domain"` // Cookie domain (e.g., ".example.com"). Empty = current host.
+	Secure bool   `koanf:"secure"` // Set Secure flag. Auto-set true when environment=production.
+}
+
+type RateLimitConfig struct {
+	Enabled             bool `koanf:"enabled"`
+	LoginMaxAttempts    int  `koanf:"login_max_attempts"`
+	RegisterMaxAttempts int  `koanf:"register_max_attempts"`
+	RefreshMaxAttempts  int  `koanf:"refresh_max_attempts"`
+	SSOMaxAttempts      int  `koanf:"sso_max_attempts"`
+	WindowSeconds       int  `koanf:"window_seconds"`
+	TrustProxy          bool `koanf:"trust_proxy"`
 }
 
 // Load loads configuration from file and environment variables
@@ -152,7 +206,7 @@ func setDefaults(cfg *Config) {
 		cfg.JWT.AccessExpiryMins = 15
 	}
 	if cfg.JWT.RefreshExpiryDays == 0 {
-		cfg.JWT.RefreshExpiryDays = 7
+		cfg.JWT.RefreshExpiryDays = 1
 	}
 	if cfg.WhatsApp.APIVersion == "" {
 		cfg.WhatsApp.APIVersion = "v18.0"
@@ -165,5 +219,48 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Storage.LocalPath == "" {
 		cfg.Storage.LocalPath = "./uploads"
+	}
+	// Default admin credentials (only used during initial setup)
+	if cfg.DefaultAdmin.Email == "" {
+		cfg.DefaultAdmin.Email = "admin@admin.com"
+	}
+	if cfg.DefaultAdmin.Password == "" {
+		cfg.DefaultAdmin.Password = "admin"
+	}
+	if cfg.DefaultAdmin.FullName == "" {
+		cfg.DefaultAdmin.FullName = "Admin"
+	}
+	// Cookie defaults
+	if cfg.App.Environment == "production" {
+		cfg.Cookie.Secure = true
+	}
+	// Rate limiting defaults
+	if cfg.RateLimit.LoginMaxAttempts == 0 {
+		cfg.RateLimit.LoginMaxAttempts = 10
+	}
+	if cfg.RateLimit.RegisterMaxAttempts == 0 {
+		cfg.RateLimit.RegisterMaxAttempts = 10
+	}
+	if cfg.RateLimit.RefreshMaxAttempts == 0 {
+		cfg.RateLimit.RefreshMaxAttempts = 30
+	}
+	if cfg.RateLimit.SSOMaxAttempts == 0 {
+		cfg.RateLimit.SSOMaxAttempts = 10
+	}
+	if cfg.RateLimit.WindowSeconds == 0 {
+		cfg.RateLimit.WindowSeconds = 60
+	}
+	// Calling defaults
+	if cfg.Calling.MaxCallDuration == 0 {
+		cfg.Calling.MaxCallDuration = 300
+	}
+	if cfg.Calling.AudioDir == "" {
+		cfg.Calling.AudioDir = "./audio"
+	}
+	if cfg.Calling.HoldMusicFile == "" {
+		cfg.Calling.HoldMusicFile = "hold_music.opus"
+	}
+	if cfg.Calling.TransferTimeoutSecs == 0 {
+		cfg.Calling.TransferTimeoutSecs = 120
 	}
 }

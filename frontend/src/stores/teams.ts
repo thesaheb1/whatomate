@@ -15,17 +15,37 @@ export interface UpdateTeamData {
   is_active?: boolean
 }
 
+export interface FetchTeamsParams {
+  search?: string
+  page?: number
+  limit?: number
+}
+
+export interface FetchTeamsResponse {
+  teams: Team[]
+  total: number
+  page: number
+  limit: number
+}
+
 export const useTeamsStore = defineStore('teams', () => {
   const teams = ref<Team[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
 
-  async function fetchTeams(): Promise<void> {
+  async function fetchTeams(params?: FetchTeamsParams): Promise<FetchTeamsResponse> {
     loading.value = true
     error.value = null
     try {
-      const response = await teamsService.list()
-      teams.value = response.data.data.teams || []
+      const response = await teamsService.list(params)
+      const data = (response.data as any).data || response.data
+      teams.value = data.teams || []
+      return {
+        teams: data.teams || [],
+        total: data.total ?? teams.value.length,
+        page: data.page ?? 1,
+        limit: data.limit ?? 50
+      }
     } catch (err: any) {
       error.value = err.response?.data?.message || 'Failed to fetch teams'
       throw err
@@ -39,7 +59,7 @@ export const useTeamsStore = defineStore('teams', () => {
     error.value = null
     try {
       const response = await teamsService.create(data)
-      const newTeam = response.data.data.team
+      const newTeam = (response.data as any).data?.team || response.data?.team
       teams.value.unshift(newTeam)
       return newTeam
     } catch (err: any) {
@@ -55,7 +75,7 @@ export const useTeamsStore = defineStore('teams', () => {
     error.value = null
     try {
       const response = await teamsService.update(id, data)
-      const updatedTeam = response.data.data.team
+      const updatedTeam = (response.data as any).data?.team || response.data?.team
       const index = teams.value.findIndex(t => t.id === id)
       if (index !== -1) {
         teams.value[index] = updatedTeam
@@ -86,7 +106,7 @@ export const useTeamsStore = defineStore('teams', () => {
   async function fetchTeamMembers(teamId: string): Promise<TeamMember[]> {
     try {
       const response = await teamsService.listMembers(teamId)
-      return response.data.data.members || []
+      return (response.data as any).data?.members || response.data?.members || []
     } catch (err: any) {
       error.value = err.response?.data?.message || 'Failed to fetch team members'
       throw err
@@ -101,7 +121,7 @@ export const useTeamsStore = defineStore('teams', () => {
       if (team) {
         team.member_count = (team.member_count || 0) + 1
       }
-      return response.data.data.member
+      return (response.data as any).data?.member || response.data?.member
     } catch (err: any) {
       error.value = err.response?.data?.message || 'Failed to add team member'
       throw err
@@ -122,10 +142,6 @@ export const useTeamsStore = defineStore('teams', () => {
     }
   }
 
-  function getTeamById(id: string): Team | undefined {
-    return teams.value.find(t => t.id === id)
-  }
-
   return {
     teams,
     loading,
@@ -136,7 +152,6 @@ export const useTeamsStore = defineStore('teams', () => {
     deleteTeam,
     fetchTeamMembers,
     addTeamMember,
-    removeTeamMember,
-    getTeamById
+    removeTeamMember
   }
 })
