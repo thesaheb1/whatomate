@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { PageHeader } from '@/components/shared'
 import LanguageSwitcher from '@/components/LanguageSwitcher.vue'
 import { toast } from 'vue-sonner'
-import { Settings, Bell, Loader2, Globe, Phone, Upload, Play, Music } from 'lucide-vue-next'
+import { Settings, Bell, Loader2, Globe, Phone, Upload, Play, Pause, Music } from 'lucide-vue-next'
 import { usersService, organizationService } from '@/services/api'
 
 const { t } = useI18n()
@@ -400,7 +400,8 @@ function togglePlayAudio(type: 'hold_music' | 'ringback') {
                       class="h-8 w-8 p-0 text-white/50 hover:text-white light:text-gray-500 light:hover:text-gray-900"
                       @click="togglePlayAudio('hold_music')"
                     >
-                      <Play class="h-4 w-4" />
+                      <Pause v-if="playingHoldMusic" class="h-4 w-4" />
+                      <Play v-else class="h-4 w-4" />
                     </Button>
                   </div>
                   <div class="flex items-center gap-2">
@@ -433,7 +434,8 @@ function togglePlayAudio(type: 'hold_music' | 'ringback') {
                       class="h-8 w-8 p-0 text-white/50 hover:text-white light:text-gray-500 light:hover:text-gray-900"
                       @click="togglePlayAudio('ringback')"
                     >
-                      <Play class="h-4 w-4" />
+                      <Pause v-if="playingRingback" class="h-4 w-4" />
+                      <Play v-else class="h-4 w-4" />
                     </Button>
                   </div>
                   <div class="flex items-center gap-2">
