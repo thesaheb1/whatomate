@@ -336,12 +336,6 @@ func (a *App) UploadIVRAudio(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Unsupported audio type: "+mimeType, nil, "")
 	}
 
-	// Determine extension
-	ext := getExtensionFromMimeType(mimeType)
-	if ext == "" {
-		ext = ".bin"
-	}
-
 	// Ensure audio directory exists
 	audioDir := a.getAudioDir()
 	if err := os.MkdirAll(audioDir, 0755); err != nil {
@@ -349,17 +343,29 @@ func (a *App) UploadIVRAudio(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create audio directory", nil, "")
 	}
 
-	// Generate filename: uuid + extension
-	filename := uuid.New().String() + ext
+	// Save uploaded file to a temp location for transcoding
+	tmpInput, err := os.CreateTemp("", "ivr-audio-input-*")
+	if err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create temp file", nil, "")
+	}
+	defer os.Remove(tmpInput.Name())
+
+	if _, err := tmpInput.Write(data); err != nil {
+		tmpInput.Close()
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to write temp file", nil, "")
+	}
+	tmpInput.Close()
+
+	// Transcode to OGG/Opus 48kHz mono for WebRTC compatibility
+	filename := uuid.New().String() + ".ogg"
 	filePath := filepath.Join(audioDir, filename)
 
-	// Save file
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
-		a.Log.Error("Failed to save audio file", "error", err)
-		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to save audio file", nil, "")
+	if err := transcodeToOpus(tmpInput.Name(), filePath); err != nil {
+		a.Log.Error("IVR audio transcoding failed", "error", err, "original_mime", mimeType)
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to transcode audio to Opus format", nil, "")
 	}
 
-	a.Log.Info("IVR audio uploaded", "filename", filename, "mime_type", mimeType, "size", len(data))
+	a.Log.Info("IVR audio uploaded", "filename", filename, "original_mime", mimeType, "size", len(data))
 
 	return r.SendEnvelope(map[string]any{
 		"filename":  filename,
